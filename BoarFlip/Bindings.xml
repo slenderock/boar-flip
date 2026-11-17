@@ -1,0 +1,6 @@
+<Bindings>
+    <!-- Named BOARBANDAGES_BUY from before the rename, so a key you already set keeps working. -->
+    <Binding name="BOARBANDAGES_BUY" category="Boar Flip">
+        BoarFlip_Buy()
+    </Binding>
+</Bindings>

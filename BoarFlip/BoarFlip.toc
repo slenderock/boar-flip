@@ -1,0 +1,8 @@
+## Interface: 16001
+## Title: Boar Flip
+## Notes: Buy cloth on the auction house, craft First Aid bandages and sell them to a vendor: one window with the totals and a button for each step. /flip
+## Author: Mottled Boar Daycare
+## Version: 2.0
+## SavedVariables: BoarFlipDB
+
+BoarFlip.lua
