@@ -441,8 +441,8 @@ end
 
 -- Vendor deals ----------------------------------------------------------------
 -- /flip scan at the auction house goes through everything listed, a page at a time (the
--- same search Auctionator's scan uses), and keeps what a vendor pays more for than its
--- cheapest listing. That search gives one line per item: the cheapest price and how many
+-- same search Auctionator's scan uses), and keeps what a vendor pays at least MIN_MARGIN
+-- more for than its cheapest listing. That search gives one line per item: the cheapest price and how many
 -- are listed in all. So each deal's listings are then looked up, one item at a time in
 -- the gaps between the cloth searches, for the exact ones under the vendor price: they
 -- add up to what Buy all would earn, and they are what Buy next buys. The cloth
@@ -455,6 +455,7 @@ local SCAN_KEEP, SCAN_SAVED = 5, 50   -- scans kept, deals kept for the older on
 local LOOK_TIMEOUT = 3      -- seconds to wait for one deal's listings
 local BUY_TIMEOUT = 8       -- seconds to wait for a purchase to go through
 local BUYS_KEPT = 50        -- purchases kept in BoarFlipDB.buys
+local MIN_MARGIN = 20       -- copper a vendor must pay over the price, per item; less isn't worth it
 local PRICE_SORT = { { sortOrder = Enum.AuctionHouseSortOrder and Enum.AuctionHouseSortOrder.Price or 0, reverseSort = false } }
 
 local function resumeSearch()
@@ -534,7 +535,8 @@ local function finishScan(deals, seen, unpriced)
   if older and older.deals and #older.deals > SCAN_SAVED then
     for k = #older.deals, SCAN_SAVED + 1, -1 do older.deals[k] = nil end
   end
-  table.insert(db.scans, 1, { at = time(), items = seen, unpriced = unpriced, found = #deals, deals = deals })
+  table.insert(db.scans, 1, { at = time(), items = seen, unpriced = unpriced, found = #deals, deals = deals,
+    margin = MIN_MARGIN })
   while #db.scans > SCAN_KEEP do table.remove(db.scans) end
   scan.phase, scan.token = nil, nil
   buyer.next, buyer.halted = nil, nil
@@ -542,12 +544,13 @@ local function finishScan(deals, seen, unpriced)
   log("scan: done.", seen, "items,", #deals, "deals,", unpriced, "unpriced")
   local left = unpriced > 0 and (" (%d the game didn't load in time are left out)"):format(unpriced) or ""
   if #deals == 0 then
-    say(("Scanned %d items: none sells to a vendor for more than its cheapest listing%s."):format(seen, left))
+    say(("Scanned %d items: none sells to a vendor for %s more than its cheapest listing%s."):format(
+      seen, money(MIN_MARGIN), left))
   else
     local best = deals[1]
     local link = select(2, GetItemInfo(best.id)) or best.name or ("item " .. best.id)
-    say(("Scanned %d items: %d sell to a vendor for more than their cheapest listing%s. Best: %s, +%s each."):format(
-      seen, #deals, left, link, money(best.vendor - best.price)))
+    say(("Scanned %d items: %d sell to a vendor for %s or more over their cheapest listing%s. Best: %s, +%s each."):format(
+      seen, #deals, money(MIN_MARGIN), left, link, money(best.vendor - best.price)))
     say("Looking up their listings now, for what Buy all would earn. Stay at the auction house.")
   end
   if updateDeals then updateDeals() end
@@ -567,7 +570,7 @@ local function priceResults(results)
     if not id or (r.totalQuantity or 0) == 0 or (r.minPrice or 0) <= 0 then return true end
     local vendor = select(11, GetItemInfo(id))
     if vendor == nil then return false end
-    if vendor > r.minPrice then
+    if vendor - r.minPrice >= MIN_MARGIN then
       local k = r.itemKey
       local keyText = ("%d:%d:%d:%d"):format(id, k.itemLevel or 0, k.itemSuffix or 0, k.battlePetSpeciesID or 0)
       if added[keyText] then return true end
@@ -637,7 +640,7 @@ local function holdForClick()
   return over(buyButton) or over(dealBuyButton)
 end
 
--- A deal's listings are in: d.buys is what's under the vendor price (empty for none),
+-- A deal's listings are in: d.buys is what's MIN_MARGIN under the vendor price (empty for none),
 -- d.kind whether it's bought by the auction (item) or by the quantity (commodity).
 local function lookDone(d)
   look.want = nil
@@ -691,7 +694,7 @@ local function lookStep()
 end
 
 -- Items (gear): each auction is a purchase. Only single ones, not yours or your
--- account's, with a buyout under what a vendor pays. (Whether the game's buyout of an
+-- account's, with a buyout MIN_MARGIN under what a vendor pays. (Whether the game's buyout of an
 -- auction of several is for one or for all of them isn't known, so those are left out.)
 local function onLookItems(itemKey)
   local d = look.want
@@ -723,7 +726,7 @@ local function onLookItems(itemKey)
   for i = 1, n do
     local r = C_AuctionHouse.GetItemSearchResultInfo(itemKey, i)
     if r and r.buyoutAmount and r.buyoutAmount > 0 and (r.quantity or 1) == 1
-      and not (r.containsOwnerItem or r.containsAccountItem) and r.buyoutAmount < d.vendor then
+      and not (r.containsOwnerItem or r.containsAccountItem) and r.buyoutAmount <= d.vendor - MIN_MARGIN then
       buys[#buys + 1] = { auction = r.auctionID, qty = 1, cost = r.buyoutAmount }
       if r.itemLink then d.link = r.itemLink end
     end
@@ -732,15 +735,15 @@ local function onLookItems(itemKey)
   lookDone(d)
 end
 
--- Commodities (stacking goods): one purchase of everything under the vendor price that
--- isn't yours, cheapest first.
+-- Commodities (stacking goods): one purchase of everything MIN_MARGIN under the vendor
+-- price that isn't yours, cheapest first.
 local function onLookCommodity(itemID)
   local d = look.want
   if not (d and d.id == itemID) then return end
   local qty, cost = 0, 0
   for i = 1, C_AuctionHouse.GetNumCommoditySearchResults(itemID) do
     local r = C_AuctionHouse.GetCommoditySearchResultInfo(itemID, i)
-    if not r or r.unitPrice >= d.vendor then break end
+    if not r or r.unitPrice > d.vendor - MIN_MARGIN then break end
     local q = r.quantity - (r.numOwnerItems or 0)
     if q > 0 then qty, cost = qty + q, cost + q * r.unitPrice end
   end
@@ -760,9 +763,10 @@ local function nextPurchase()
   end
 end
 
--- The one check every purchase passes: under what a vendor pays, and gold for it.
+-- The one check every purchase passes: MIN_MARGIN a piece under what a vendor pays, and
+-- gold for it.
 local function allowed(p)
-  return p ~= nil and p.b.cost > 0 and p.b.cost < p.d.vendor * p.b.qty and p.b.cost <= GetMoney()
+  return p ~= nil and p.b.cost > 0 and p.b.cost <= (p.d.vendor - MIN_MARGIN) * p.b.qty and p.b.cost <= GetMoney()
 end
 
 -- Whether the Buy next button may buy now.
@@ -852,7 +856,7 @@ local function onDealEvent(event, ...)
   if not p then return end
   if event == "COMMODITY_PRICE_UPDATED" and buyer.state == "quoting" then
     local _, total = ...
-    if total and total < p.d.vendor * p.b.qty and total <= GetMoney() then
+    if total and total <= (p.d.vendor - MIN_MARGIN) * p.b.qty and total <= GetMoney() then
       buyer.quote = total
       if db.clickToConfirm then
         buyer.state = "confirm"
@@ -1608,7 +1612,7 @@ local function dealRowText(d)
   if d.bought then return ("|cff73ff73bought %d|r"):format(d.bought) end
   if d.skipped then return "|cff999999skipped|r" end
   if d.noAnswer then return "|cff999999no answer|r" end
-  return "|cff999999none under vendor now|r"
+  return ("|cff999999none %s under vendor now|r"):format(money(MIN_MARGIN))
 end
 
 local function plainName(d)
@@ -1801,8 +1805,8 @@ updateDeals = function()
   elseif scan.phase == "pricing" then
     dealStatus:SetText("Checking vendor prices...")
   elseif s then
-    dealStatus:SetText(("Scan at %s: %d items, %d under vendor price%s."):format(date("%H:%M", s.at),
-      s.items, s.found, s.unpriced > 0 and (", %d not loaded"):format(s.unpriced) or ""))
+    dealStatus:SetText(("Scan at %s: %d items, %d deals of %s+%s."):format(date("%H:%M", s.at),
+      s.items, s.found, money(MIN_MARGIN), s.unpriced > 0 and (", %d not loaded"):format(s.unpriced) or ""))
   else
     dealStatus:SetText("No scan yet: /flip scan at the auction house.")
   end
@@ -2047,6 +2051,18 @@ local function onLoaded()
     if db.max and db.max ~= 180 then s.max = db.max end   -- 1s80 was the first default
     db.mail[4306] = db.mailSilk
     db.spent, db.bought, db.earned, db.sold, db.max, db.mailSilk, db.version = nil, nil, nil, nil, nil, nil, nil
+  end
+  -- A scan from before the minimum margin (or another one): drop what earns less.
+  local s = db.scans and db.scans[1]
+  if s and s.deals and s.margin ~= MIN_MARGIN then
+    local keep = {}
+    for _, d in ipairs(s.deals) do
+      for k = #(d.buys or {}), 1, -1 do
+        if d.buys[k].cost > (d.vendor - MIN_MARGIN) * d.buys[k].qty then table.remove(d.buys, k) end
+      end
+      if d.vendor - d.price >= MIN_MARGIN then keep[#keep + 1] = d end
+    end
+    s.deals, s.found, s.margin = keep, #keep, MIN_MARGIN
   end
   cur = FLIPS[db.flip] or FLIPS.heavysilk
   db.flip = cur.key
