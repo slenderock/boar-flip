@@ -185,7 +185,7 @@ function mock.pay(copper)
   mock.fire("PLAYER_MONEY")
 end
 
--- Items: mock.items[id] = { name, sell, stack }.
+-- Items: mock.items[id] = { name, sell, stack, quality, level, equip, class, subclass }.
 local function itemID(x)
   if type(x) == "number" then return x end
   return tonumber(tostring(x):match("item:(%d+)"))
@@ -195,9 +195,19 @@ local function getItemInfo(x)
   local it = id and mock.items[id]
   if not it then return nil end
   local link = "|cffffffff|Hitem:" .. id .. "::::::::|h[" .. it.name .. "]|h|r"
-  return it.name, link, 1, 20, 1, "Misc", "Misc", it.stack or 20, "", 0, it.sell
+  return it.name, link, it.quality or 1, it.level or 20, 1, "Misc", "Misc", it.stack or 20, it.equip or "", 0, it.sell,
+    it.class or 15, it.subclass or 0
 end
 GetItemInfo = getItemInfo
+
+-- Skills: mock.skills = { { name, rank } } (the old skill list; no GetProfessions).
+mock.skills = {}
+function GetNumSkillLines() return #mock.skills end
+function GetSkillLineInfo(i)
+  local s = mock.skills[i]
+  if s then return s[1], false, false, s[2] end
+end
+function GetSpellInfo(id) if id == 7411 then return "Enchanting" end end
 
 -- Bags: 5 bags of 16 slots, mock.bag[bag][slot] = { itemID, stackCount, isLocked }.
 mock.bag = {}

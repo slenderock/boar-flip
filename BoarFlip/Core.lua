@@ -2,7 +2,9 @@
 --   Core.lua (this file): what the modules share. The log and chat, money, bags, the
 --     auction house ticker that takes turns between the modules, the events, /flip.
 --   Bandages.lua: buy cloth, craft First Aid bandages, sell them to a vendor.
---   Deals.lua: /flip scan, items a vendor pays more for than they cost, and Buy next.
+--   Scan.lua: the scan of the whole auction house, which every module reads.
+--   Deals.lua: items in the scan a vendor pays more for than they cost, and Buy next.
+--   Disenchant.lua: gear in the scan that costs less than it would disenchant into.
 -- Off after each login and /reload: /flip turns it on and shows the window, /flip off or
 -- the X turns it off. The game lets an addon buy, list or craft only as the very first
 -- thing a click does, so those clicks call the game before anything else.

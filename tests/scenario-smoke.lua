@@ -38,7 +38,7 @@ check(clicked > 5, "clicked " .. clicked .. " buttons")
 mock.openAH()
 mock.wait(0.5)
 for _, cmd in ipairs({ "help", "on", "deals", "scan", "max 1s90", "max", "list 1s50", "list", "free 1", "free",
-  "sound", "sound", "pause", "pause", "auto", "reset", "debug", "debug", "window", "window", "off", "off", "" }) do
+  "sound", "sound", "pause", "pause", "auto", "reset", "de", "debug", "debug", "window", "window", "off", "off", "" }) do
   mock.slash(cmd)
   mock.wait(0.2)
 end

@@ -1,5 +1,5 @@
--- Vendor deals: /flip scan at the auction house goes through everything listed and
--- keeps what a vendor pays at least MIN_MARGIN more for than its cheapest listing. Each
+-- Vendor deals: from each scan of the auction house (Scan.lua), what a vendor pays at
+-- least MIN_MARGIN more for than its cheapest listing. Each
 -- deal's listings are then looked up, for what Buy all would earn, and Buy next buys
 -- them one click at a time, best deal first. The window docks left of the main one.
 
@@ -15,63 +15,27 @@ local db   -- the saved settings
 -- The module. No switch: everything it does follows a scan you clicked.
 local M = ns.module("deals", { title = "Vendor deals", order = 2 })
 
--- /flip scan (see below). phase: start (search not sent yet), paging,
--- pricing, or nil when no scan is going.
-local scan = {}
 -- After a scan: the lookup of each deal's listings (running, want = the deal waiting for
 -- its answer), and Buy next (state: quoting, confirm, buying, bidding or nil; p = the
 -- purchase going; next = the one the button buys).
 local look, buyer = {}, {}
 local updateDeals, dealBuyButton   -- the deals window, made further down
 
-local function scanning()
-  return scan.phase == "start" or scan.phase == "paging"
-end
+local scanning = ns.scanning
 
 -- Vendor deals ----------------------------------------------------------------
--- /flip scan at the auction house goes through everything listed, a page at a time (the
--- same search Auctionator's scan uses), and keeps what a vendor pays at least MIN_MARGIN
--- more for than its cheapest listing. That search gives one line per item: the cheapest price and how many
--- are listed in all. So each deal's listings are then looked up, one item at a time in
--- the gaps between the cloth searches, for the exact ones under the vendor price: they
--- add up to what Buy all would earn, and they are what Buy next buys. The cloth
--- searching waits while the scan pages. Scans are kept in BoarFlipDB.scans (the latest
--- with all its deals), purchases in BoarFlipDB.buys.
-local SCAN_TIMEOUT = 20     -- seconds without a page before giving up
-local SCAN_BATCH = 400      -- items priced per frame, so the game doesn't freeze
-local SCAN_WAIT = 10        -- seconds to wait for items the game hasn't loaded yet
+-- Each scan keeps what a vendor pays at least MIN_MARGIN more for than its cheapest
+-- listing. The scan gives one line per item: the cheapest price and how many are listed
+-- in all. So each deal's listings are then looked up, one item at a time in the gaps
+-- between the cloth searches, for the exact ones under the vendor price: they add up to
+-- what Buy all would earn, and they are what Buy next buys. Scans are kept in
+-- BoarFlipDB.scans (the latest with all its deals), purchases in BoarFlipDB.buys.
 local SCAN_KEEP, SCAN_SAVED = 5, 50   -- scans kept, deals kept for the older ones
 local LOOK_TIMEOUT = 3      -- seconds to wait for one deal's listings
 local BUY_TIMEOUT = 8       -- seconds to wait for a purchase to go through
 local SETTLE_WAIT, ERROR_WAIT = 2, 3   -- seconds for the gold after the game's word; for the word after an error
 local BUYS_KEPT = 50        -- purchases kept in BoarFlipDB.buys
 local MIN_MARGIN = 20       -- copper a vendor must pay over the price, per item; less isn't worth it
-
-local function stopScan(text)
-  ns.releaseAH(M)
-  scan.phase, scan.token, scan.wantMore = nil, nil, nil
-  if text then say(text) end
-  ns.fire("scan")
-  if updateDeals then updateDeals() end
-end
-
--- Runs from the auction house ticker while scanning: sends the search, then asks for
--- the next page once the last one is in and the auction house takes messages again.
-local function scanPage()
-  if GetTime() - scan.pageAt > SCAN_TIMEOUT then
-    return stopScan("Scan stopped: no answer from the auction house.")
-  end
-  if not ah.ready then return end
-  if scan.phase == "start" then
-    scan.phase, scan.pageAt = "paging", GetTime()
-    log("scan: SendBrowseQuery")
-    C_AuctionHouse.SendBrowseQuery({ searchString = "", sorts = {}, filters = {}, itemClassFilters = {} })
-  elseif scan.wantMore then
-    scan.wantMore, scan.pageAt = false, GetTime()
-    log("scan: RequestMoreBrowseResults, items so far", scan.count)
-    C_AuctionHouse.RequestMoreBrowseResults()
-  end
-end
 
 local function lastScan()
   return db.scans and db.scans[1]
@@ -122,7 +86,6 @@ local function finishScan(deals, seen, unpriced)
   table.insert(db.scans, 1, { at = time(), items = seen, unpriced = unpriced, found = #deals, deals = deals,
     margin = MIN_MARGIN })
   while #db.scans > SCAN_KEEP do table.remove(db.scans) end
-  scan.phase, scan.token = nil, nil
   buyer.next, buyer.halted = nil, nil
   startLook()
   log("scan: done.", seen, "items,", #deals, "deals,", unpriced, "unpriced")
@@ -137,89 +100,6 @@ local function finishScan(deals, seen, unpriced)
       seen, #deals, money(MIN_MARGIN), left, link, money(best.vendor - best.price)))
     say("Looking up their listings now, for what Buy all would earn. Stay at the auction house.")
   end
-  if updateDeals then updateDeals() end
-end
-
--- Compares each item's cheapest listing with what a vendor pays, a batch per frame. Items
--- the game hasn't loaded yet are asked for and looked at again for a few seconds.
-local function priceResults(results)
-  scan.phase, scan.wantMore = "pricing", nil
-  ns.releaseAH(M)
-  local token = scan.token
-  local deals, later, i, waitFrom = {}, {}, 1, nil
-  local added = {}   -- item keys already in deals: the pages can bring one twice
-
-  local function check(r)   -- false while the game hasn't loaded the item
-    local id = r.itemKey and r.itemKey.itemID
-    if not id or (r.totalQuantity or 0) == 0 or (r.minPrice or 0) <= 0 then return true end
-    local vendor = select(11, GetItemInfo(id))
-    if vendor == nil then return false end
-    if vendor - r.minPrice >= MIN_MARGIN then
-      local k = r.itemKey
-      local keyText = ("%d:%d:%d:%d"):format(id, k.itemLevel or 0, k.itemSuffix or 0, k.battlePetSpeciesID or 0)
-      if added[keyText] then return true end
-      added[keyText] = true
-      deals[#deals + 1] = { id = id, price = r.minPrice, vendor = vendor, qty = r.totalQuantity,
-        own = r.containsOwnerItem or nil,
-        key = { itemID = id, itemLevel = k.itemLevel, itemSuffix = k.itemSuffix, battlePetSpeciesID = k.battlePetSpeciesID } }
-    end
-    return true
-  end
-
-  local step
-  step = safe(function()
-    if scan.token ~= token then return end
-    if i <= #results then
-      for _ = 1, SCAN_BATCH do
-        local r = results[i]
-        if not r then break end
-        if not check(r) then
-          later[#later + 1] = r
-          if C_Item and C_Item.RequestLoadItemDataByID then C_Item.RequestLoadItemDataByID(r.itemKey.itemID) end
-        end
-        i = i + 1
-      end
-      C_Timer.After(0, step)
-      return
-    end
-    waitFrom = waitFrom or GetTime()
-    if #later > 0 and GetTime() - waitFrom < SCAN_WAIT then
-      local still = {}
-      for _, r in ipairs(later) do
-        if not check(r) then still[#still + 1] = r end
-      end
-      later = still
-      if #later > 0 then
-        C_Timer.After(0.5, step)
-        return
-      end
-    end
-    finishScan(deals, #results, #later)
-  end)
-  step()
-end
-
--- The browse events: the first page comes as "updated", the rest as "added".
-local function onBrowse(event, added)
-  if scan.phase ~= "paging" then return end
-  scan.pageAt = GetTime()
-  if event == "AUCTION_HOUSE_BROWSE_RESULTS_ADDED" then
-    scan.count = (scan.count or 0) + (type(added) == "table" and #added or 0)
-  else
-    -- A first page with fewer items than the scan had: another search replaced it.
-    local n = #C_AuctionHouse.GetBrowseResults()
-    if n < (scan.count or 0) then
-      log("scan: replaced,", scan.count, "items so far, now", n)
-      return stopScan("Scan stopped: another search in the auction house replaced it. Rescan, and don't search until it's done.")
-    end
-    scan.count = n
-  end
-  if C_AuctionHouse.HasFullBrowseResults() then
-    priceResults(C_AuctionHouse.GetBrowseResults())
-  else
-    scan.wantMore = true
-  end
-  ns.fire("scan")
   if updateDeals then updateDeals() end
 end
 
@@ -596,21 +476,6 @@ function M.Open(show)
   if show then showDeals() else hideDeals() end
 end
 
-local function startScan()
-  if not ns.on then return say("Boar Flip is off: /flip turns it on.") end
-  if not ah.open then return say("Scanning works at the auction house.") end
-  if scan.phase then return say("Already scanning.") end
-  if ns.busy() then return say("Wait until the purchase, mail, crafting or selling is done.") end
-  look.running, look.want = false, nil
-  scan.phase, scan.count, scan.token, scan.pageAt, scan.wantMore = "start", 0, {}, GetTime(), false
-  ns.holdAH(M, { wait = "the scan", status = function()
-    return ("Scanning for vendor deals: %d items so far"):format(scan.count or 0)
-  end })
-  say("Scanning the auction house for vendor deals. Don't search in it until it's done.")
-  ns.fire("scan")
-  showDeals()
-end
-
 local function makeDeals()
   dealsFrame = CreateFrame("Frame", "BoarFlipDealsFrame", UIParent, "BackdropTemplate")
   dealsFrame:SetSize(DEAL_WIDTH, -DEAL_BOTTOM + 14 + 14 + 6 + 22 + 10)
@@ -632,7 +497,7 @@ local function makeDeals()
   dealsFrame.rescan:SetSize(64, 18)
   dealsFrame.rescan:SetPoint("RIGHT", closeButton, "LEFT", -2, 0)
   dealsFrame.rescan:SetText("Rescan")
-  dealsFrame.rescan:SetScript("OnClick", safe(startScan))
+  dealsFrame.rescan:SetScript("OnClick", safe(function() ns.startScan(M) end))
 
 
   dealStatus = line(-30, 0.6)
@@ -707,8 +572,8 @@ updateDeals = function()
   buyer.next = nxt
 
   if scanning() then
-    dealStatus:SetText(("Scanning: %d items so far..."):format(scan.count or 0))
-  elseif scan.phase == "pricing" then
+    dealStatus:SetText(("Scanning: %d items so far..."):format(ns.scanCount()))
+  elseif ns.scanPhase() == "pricing" then
     dealStatus:SetText("Checking vendor prices...")
   elseif s then
     dealStatus:SetText(("Scan at %s: %d items, %d deals of %s+%s."):format(date("%H:%M", s.at),
@@ -719,7 +584,7 @@ updateDeals = function()
 
   -- What Buy all would earn.
   local t = s and dealTotals(s)
-  if not (s and s.deals[1]) or scan.phase then
+  if not (s and s.deals[1]) or ns.scanPhase() then
     dealEarn:SetText("")
   elseif not s.deals[1].key then
     dealEarn:SetText("This scan is from an older Boar Flip: /flip scan again.")
@@ -801,7 +666,7 @@ updateDeals = function()
   skipButton:SetEnabled(nxt ~= nil and not buyer.state)
   -- Scan until there's a scan, then Rescan: at the auction house, when nothing is going.
   dealsFrame.rescan:SetText(s and "Rescan" or "Scan")
-  dealsFrame.rescan:SetEnabled(ns.on and ah.open and not scan.phase and not ns.busy())
+  dealsFrame.rescan:SetEnabled(ns.on and ah.open and not ns.scanPhase() and not ns.busy())
 end
 
 function M.Busy() return buyer.state ~= nil end
@@ -829,13 +694,9 @@ function M.Totals()
 end
 function M.Gains() return buyer.gains or {} end
 
--- The scan, and the purchase's timeouts, before anything else; the lookups in the gaps
--- the cloth search leaves (see ns.onTick).
+-- The purchase's timeouts after the scan's paging; the lookups in the gaps the cloth
+-- search leaves (see ns.onTick).
 ns.onTick(M, 1, function()
-  if scanning() then
-    scanPage()
-    return true
-  end
   buyerTimeouts()
   return false
 end)
@@ -845,12 +706,10 @@ end)
 
 ns.listen("turn", function(value)
   if value then return end
-  if scan.phase then stopScan(nil) end
   look.running, look.want = false, nil
   if buyer.state == "quoting" or buyer.state == "confirm" then purchaseTimedOut("turned off") end
 end)
 
-ns.command("scan", function() startScan() end)
 ns.command("deals", function()
   if not ns.on then return say("Boar Flip is off: /flip turns it on.") end
   showDeals()
@@ -907,16 +766,35 @@ ns.listen("AUCTION_HOUSE_SHOW", function()
 end)
 
 ns.listen("AUCTION_HOUSE_CLOSED", function()
-  if scanning() then stopScan("Scan stopped: the auction house closed.") end
   if buyer.state then purchaseTimedOut("the auction house closed") end
   look.want = nil
 end)
 
-ns.listen("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED", function(...) onBrowse("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED", ...) end)
-ns.listen("AUCTION_HOUSE_BROWSE_RESULTS_ADDED", function(...) onBrowse("AUCTION_HOUSE_BROWSE_RESULTS_ADDED", ...) end)
-ns.listen("AUCTION_HOUSE_BROWSE_FAILURE", function()
-  if scanning() then stopScan("The auction house turned the scan down. Try /flip scan again.") end
-end)
+-- Each scan: what a vendor pays MIN_MARGIN or more over the cheapest listing. A scan
+-- started here or by /flip scan opens the window.
+local found, added   -- the scan going: its deals, and the item keys in them (the pages can bring one twice)
+ns.onScan({
+  start = function(by)
+    look.running, look.want = false, nil
+    found, added = {}, {}
+    if by == nil or by == M then showDeals() end
+  end,
+  item = function(e)
+    if e.vendor - e.price < MIN_MARGIN then return end
+    local k = e.key
+    local keyText = ("%d:%d:%d:%d"):format(e.id, k.itemLevel or 0, k.itemSuffix or 0, k.battlePetSpeciesID or 0)
+    if added[keyText] then return end
+    added[keyText] = true
+    found[#found + 1] = { id = e.id, price = e.price, vendor = e.vendor, qty = e.qty, own = e.own, key = k }
+  end,
+  done = function(stats)
+    local deals = found
+    found, added = nil, nil
+    finishScan(deals, stats.items, stats.unpriced)
+  end,
+  stopped = function() found, added = nil, nil end,
+})
+ns.listen("scan", function() if updateDeals then updateDeals() end end)
 ns.listen("ITEM_SEARCH_RESULTS_UPDATED", onLookItems)
 ns.listen("COMMODITY_SEARCH_RESULTS_UPDATED", onLookCommodity)
 ns.listen("PLAYER_MONEY", onDealMoney)

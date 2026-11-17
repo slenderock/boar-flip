@@ -4,6 +4,9 @@ A World of Warcraft (Forever, Interface 16001) addon for making gold:
 
 - **Bandages:** buy cloth on the auction house, craft First Aid bandages, sell them to a vendor.
 - **Vendor deals:** scan the whole auction house for items a vendor pays at least 20c more for than they cost, and buy them one click at a time.
+- **Disenchant (a check for now):** from the same scan, green and blue gear that costs at least 20c less than its dust, essences and shards would sell for. It buys nothing yet. Values use the classic disenchant chances and the scan's cheapest material prices, less the auction house's 5%.
+
+The scan of the whole auction house is part of the core (`Scan.lua`): any module can start one, and every module reads every scan.
 
 `/flip` opens it (it's off at every login). The Boar Flip window shows the totals of every module, and a line for each with its P&L once all it holds is sold, an On/Off switch for Bandages' cloth search, and Open for its window. `/flip help` lists the commands.
 
@@ -28,7 +31,8 @@ npm test
   - **smoke:** every event, button and slash command, checked for errors.
   - **modules:** the Bandages switch, the purchase lock between modules, and the scan holding the auction house.
   - **window:** the Boar Flip window's totals and module rows, the module windows docking, and the Deals totals starting fresh.
-  - **deals-alone and bandages-alone:** each module with only `Core.lua` loaded, through `deals-alone.toc` and `bandages-alone.toc`. A scenario can name its own `.toc` on its first line (`-- toc: ...`).
+  - **disenchant:** the check's values from a scan, its window, and its Scan button.
+  - **deals-alone, bandages-alone and disenchant-alone:** each module with only the core loaded, through `deals-alone.toc`, `bandages-alone.toc` and `disenchant-alone.toc`. A scenario can name its own `.toc` on its first line (`-- toc: ...`).
 
   `node run.js scenario-deals.lua` runs one scenario. `--toc other.toc` loads a different set of files.
 

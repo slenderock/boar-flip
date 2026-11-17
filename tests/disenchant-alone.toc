@@ -1,0 +1,4 @@
+## Core, the scan and Disenchant only: Disenchant works without the other modules.
+Core.lua
+Scan.lua
+Disenchant.lua

@@ -29,7 +29,8 @@ const KNOWN = new Set([
   'ItemLocation', 'GetItemInfo', 'GetItemCount', 'NUM_BAG_SLOTS', 'ATTACHMENTS_MAX_RECEIVE',
   'PlaySoundFile', 'GetInboxNumItems', 'GetInboxItem', 'GetInboxInvoiceInfo', 'GetInboxHeaderInfo',
   'TakeInboxMoney', 'TakeInboxItem', 'AutoLootMailItem', 'CheckInbox', 'UnitCastingInfo', 'IsShiftKeyDown',
-  'hooksecurefunc', 'SlashCmdList',
+  'hooksecurefunc', 'SlashCmdList', 'GetProfessions', 'GetProfessionInfo', 'GetNumSkillLines', 'GetSkillLineInfo',
+  'GetSpellInfo', 'C_Spell',
   // Boar Flip's own, on purpose: saved variables, the key binding, the slash command.
   'BoarFlipDB', 'BoarFlip_Buy', 'BINDING_NAME_BOARBANDAGES_BUY', 'SLASH_BOARFLIP1',
 ]);
