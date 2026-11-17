@@ -15,16 +15,20 @@ local function everyEvent()
   end
   mock.wait(0.5)
 end
--- The X buttons last: the main one closes everything.
+-- The module windows' buttons first, then the core window's rows (Close hides a module
+-- window), then the X buttons (the core's closes everything).
 local function everyButton()
   local n = 0
-  for pass = 1, 2 do
+  local function pass(of)
     for _, b in ipairs(mock.buttons) do
-      local isClose = b.template == "UIPanelCloseButton"
-      if (pass == 2) == isClose and b:Click() then n = n + 1 end
+      local kind = b.template == "UIPanelCloseButton" and 3 or b.parent == BoarFlipFrame and 2 or 1
+      if kind == of and b:Click() then n = n + 1 end
       mock.wait(0.1)
     end
   end
+  pass(1)
+  pass(2)
+  pass(3)
   return n
 end
 

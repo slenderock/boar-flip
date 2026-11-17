@@ -56,7 +56,31 @@ function Widget:GetPoint() return "CENTER", nil, "CENTER", 0, 0 end
 function Widget:GetWidth() return 100 end
 function Widget:GetHeight() return 20 end
 function Widget:GetStringWidth() return #(self.text or "") * 6 end
-function Widget:CreateFontString(name) return widget("FontString", name) end
+-- Anchors are kept (w.points), to check where a window docks.
+function Widget:SetPoint(point, rel, relPoint, x, y)
+  self.points = self.points or {}
+  self.points[#self.points + 1] = { point, rel, relPoint, x, y }
+end
+function Widget:ClearAllPoints() self.points = {} end
+-- Font strings are kept in order with their parent (mock.fonts), to read a window's text.
+mock.fonts = {}
+function Widget:CreateFontString(name)
+  local fs = widget("FontString", name)
+  fs.parent = self
+  mock.fonts[#mock.fonts + 1] = fs
+  return fs
+end
+function Widget:SetTextColor(r, g, b) self.color = { r, g, b } end
+-- The value shown next to a label in a window: the font string made right after it.
+function mock.valueOf(parent, label)
+  local found = false
+  for _, fs in ipairs(mock.fonts) do
+    if fs.parent == parent then
+      if found then return mock.plain(fs.text) end
+      if fs.text == label then found = true end
+    end
+  end
+end
 function Widget:CreateTexture(name) return widget("Texture", name) end
 function Widget:RegisterEvent(e) self.events[e] = true end
 function Widget:UnregisterEvent(e) self.events[e] = nil end

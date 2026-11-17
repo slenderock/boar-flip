@@ -18,9 +18,10 @@ local findUnlocked, freeSlots, slotsNeeded = ns.findUnlocked, ns.freeSlots, ns.s
 local ah, cancelPurchase, PRICE_SORT = ns.ah, ns.cancelPurchase, ns.PRICE_SORT
 local BAGS, PAD, ROW = ns.BAGS, ns.PAD, ns.ROW
 
--- The module. Its switch is the cloth search and selling by itself at a vendor (it was
--- Pause before): off, Buy has no offer, but Open mail, Craft, Sell and List still work.
-local M = ns.module("bandages", { title = "Bandages", order = 1, switch = true })
+-- The module. Its switch (On/Off in the Boar Flip window; it was Pause) is the cloth search
+-- and selling by itself at a vendor: off, Buy has no offer, but Open mail, Craft, Sell and
+-- List still work. Its window opens the first time.
+local M = ns.module("bandages", { title = "Bandages", order = 1, switch = true, open = true })
 local function paused() return not ns.switchOn(M) end
 
 local FIRST_AID = 129       -- profession skill line
@@ -136,7 +137,7 @@ end
 -- game ever wants a click for that too, the button asks for one and remembers.
 
 local listing = {}              -- the next cloth to list (loc, price, f) and the last one sent
-local buyButton, listButton, pauseButton, note, age
+local buyButton, listButton, note, age
 
 -- The line under the totals: shows each search going out and how fresh the numbers are.
 local function showAge()
@@ -147,7 +148,7 @@ local function showAge()
   elseif not ah.open and ah.state ~= "buying" then
     age:SetText("Auction house closed")
   elseif paused() and ah.state == "idle" then
-    age:SetText("Searching paused")
+    age:SetText("Searching off")
   elseif ah.state ~= "idle" and ah.state ~= "offer" then
     age:SetText("Searching paused while buying")
   elseif ah.waiting then
@@ -164,11 +165,10 @@ local function showState()
   local s = ah.state
   local off = paused() and s == "idle"
   local max = maxPrice(cur)
-  pauseButton:SetText(paused() and "Resume" or "Pause")
   if not ah.open and s ~= "buying" then
     buyButton:SetText("Buy (at the auction house)")
   elseif off then
-    buyButton:SetText("Buy (searching paused)")
+    buyButton:SetText("Buy (searching off)")
   elseif ns.heldAH() and s == "idle" then
     buyButton:SetText("Buy (waiting for " .. (ns.heldAH().wait or "the auction house") .. ")")
   elseif s == "offer" then
@@ -202,7 +202,7 @@ local function showState()
   elseif not max then
     note:SetText("Waiting for the game to load the bandage price.")
   else
-    note:SetText(off and "Not searching. Click Resume to start again." or ah.note or "")
+    note:SetText(off and "Not searching: Bandages is Off in the Boar Flip window." or ah.note or "")
   end
 end
 
@@ -763,14 +763,7 @@ local TOP_AH = TOP_STATS - ROW * #STATS - 12
 local TOP_BUTTONS = TOP_AH - 46
 local BUTTON_GAP = 26
 
-local function setPnl(fs, copper)
-  if not copper then
-    fs:SetText("-")
-    return fs:SetTextColor(1, 1, 1)
-  end
-  fs:SetText(signed(copper))
-  if copper < 0 then fs:SetTextColor(1, 0.45, 0.45) else fs:SetTextColor(0.45, 1, 0.45) end
-end
+local setPnl = ns.setPnl
 
 local function updateWindow()
   watchCraft()
@@ -826,7 +819,6 @@ local function updateWindow()
   prepareListing()
   showState()
   showAge()
-  if ns.updateDeals then ns.updateDeals() end
 end
 
 local function resetTotals()
@@ -851,53 +843,27 @@ local function pick(f)
 end
 
 local function makeWindow()
-  win = CreateFrame("Frame", "BoarFlipFrame", UIParent, "BackdropTemplate")
+  win = CreateFrame("Frame", "BoarFlipBandagesFrame", UIParent, "BackdropTemplate")
   win:SetSize(WIDTH, -TOP_BUTTONS + 5 * BUTTON_GAP + 8)
-  if db.pos then
-    win:SetPoint(db.pos[1], UIParent, db.pos[2], db.pos[3], db.pos[4])
-  else
-    win:SetPoint("RIGHT", UIParent, "RIGHT", -60, 100)
-  end
-  win:SetBackdrop({
-    bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
-    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-    edgeSize = 12,
-    insets = { left = 3, right = 3, top = 3, bottom = 3 },
-  })
-  win:SetBackdropColor(0, 0, 0, 1)
+  ns.backdrop(win)
   win:SetClampedToScreen(true)
-  win:SetMovable(true)
   win:EnableMouse(true)
-  win:RegisterForDrag("LeftButton")
-  win:SetScript("OnDragStart", win.StartMoving)
-  win:SetScript("OnDragStop", function(self)
-    self:StopMovingOrSizing()
-    local point, _, relPoint, x, y = self:GetPoint()
-    db.pos = { point, relPoint, x, y }
-  end)
 
   local title = win:CreateFontString(nil, "OVERLAY", "GameFontNormal")
   title:SetPoint("TOPLEFT", PAD, -11)
-  title:SetText("Boar Flip")
+  title:SetText("Bandages")
 
-  -- The game's red X turns Boar Flip off. /flip turns it on again.
-  local closeButton = CreateFrame("Button", "BoarFlipCloseButton", win, "UIPanelCloseButton")
+  -- The X closes this window; Open in the Boar Flip window opens it again.
+  local closeButton = CreateFrame("Button", nil, win, "UIPanelCloseButton")
   closeButton:SetSize(24, 24)
   closeButton:SetPoint("TOPRIGHT", -4, -4)
-  closeButton:SetScript("OnClick", safe(function() ns.setOn(false) end))
-
-  pauseButton = CreateFrame("Button", nil, win, "UIPanelButtonTemplate")
-  pauseButton:SetSize(64, 18)
-  pauseButton:SetPoint("RIGHT", closeButton, "LEFT", -2, 0)
-  pauseButton:SetScript("OnClick", safe(function() setPaused(not paused()) end))
+  closeButton:SetScript("OnClick", safe(function() ns.showWindow(M, false) end))
 
   -- Reset the totals of the flip shown: a second click within 3 seconds does it.
   local resetButton = CreateFrame("Button", "BoarFlipResetButton", win, "UIPanelButtonTemplate")
   resetButton:SetSize(56, 18)
-  resetButton:SetPoint("RIGHT", pauseButton, "LEFT", -4, 0)
+  resetButton:SetPoint("RIGHT", closeButton, "LEFT", -2, 0)
   resetButton:SetText("Reset")
-  win.resetButton = resetButton   -- the Deals button goes left of it (see makeDeals in Deals.lua)
-  ns.win = win
   local askedAt
   resetButton:SetScript("OnClick", safe(function(self)
     if askedAt and GetTime() - askedAt < 3 then
@@ -971,11 +937,38 @@ local function makeWindow()
   craftButton = button("Craft", 3, onCraft)
   sellButton = button("Sell", 4, safe(function() sellBandages(true) end))
 
-  -- Starts off, so hidden. (db.hidden is from before there was on and off.)
-  db.hidden = nil
   win:Hide()
-  C_Timer.NewTicker(0.5, safe(updateWindow))
-  updateWindow()
+  M.window = win
+end
+M.Update = updateWindow
+
+-- For the Boar Flip window: spent and earned over every flip, and what the cloth and
+-- bandages on hand (in the bags and the mail) fetch as bandages, for the flip shown.
+function M.Totals()
+  local t = { spent = 0, earned = 0, held = 0 }
+  if not db then return t end
+  for _, f in ipairs(FLIPS) do
+    local s = db.flips[f.key]
+    if s then
+      t.spent = t.spent + (s.spent or 0) + (s.listSpent or 0)
+      t.earned = t.earned + (s.earned or 0) + (s.listEarned or 0)
+    end
+  end
+  local each = cur and sellPrice(cur)
+  if each then
+    local toMake = math.floor((GetItemCount(cur.buy) + (db.mail[cur.buy] or 0)) / cur.per)
+    t.held = (toMake + GetItemCount(cur.make)) * each
+  end
+  return t
+end
+
+-- What the cloth bought is worth as bandages, less what it cost, every flip.
+function M.Gains()
+  local all = {}
+  for _, list in pairs(gains) do
+    for _, g in ipairs(list) do all[#all + 1] = g end
+  end
+  return all
 end
 
 -- On and off, /flip, events ---------------------------------------------------------
@@ -983,18 +976,16 @@ end
 ns.listen("turn", function(value)
   if value then
     ah.note, ah.lastAt, ah.seen, ah.openedAt = nil, 0, false, GetTime()
-    win:Show()
     updateWindow()
   else
     if ah.state == "quoting" or ah.state == "confirm" then cancelPurchase("turned off") end
     if ah.state ~= "buying" then ah.state, ah.note, ah.token = "idle", nil, nil end
     ah.waiting = false
     if mail.running then stopMail(nil) end
-    win:Hide()
   end
 end)
 ns.listen("turned on", function()
-  if paused() then say("Searching is still paused: Resume or /flip pause starts it.") end
+  if paused() then say("Bandages is off, so no cloth search: its On button (or /flip pause) starts it.") end
 end)
 
 -- Another module (the scan) takes the auction house: the offer would go stale while the
@@ -1060,13 +1051,17 @@ ns.command("sound", function()
 end)
 ns.command("pause", function()
   setPaused(not paused())
-  say(paused() and "Searching paused." or "Searching again.")
+  say(paused() and "Bandages off: no cloth search, no selling by itself." or "Bandages on: searching again.")
 end)
 ns.command("auto", function()
   db.clickToConfirm = nil
   say("Purchases are confirmed automatically again.")
 end)
 ns.command("reset", function() resetTotals() end)
+ns.command("bandages", function()
+  if not ns.on then return say("Boar Flip is off: /flip turns it on.") end
+  ns.showWindow(M, true)
+end)
 
 ns.listen("help", function()
   local s = stats(cur)
@@ -1075,7 +1070,7 @@ ns.listen("help", function()
     cur.cloth, cur.bandage, max and money(max) or "?", list and money(list) or "?"))
   say(("Open mail keeps %d bag slot(s) free. Purchases are confirmed %s."):format(
     db.free, db.clickToConfirm and "with a second click" or "automatically"))
-  if paused() then say("Auction house searching is paused (/flip pause starts it again).") end
+  if paused() then say("Bandages is off: no cloth search (/flip pause turns it on).") end
   local cloth = GetItemCount(cur.buy)
   say(("In your bags: %d %s, enough for %d bandages."):format(cloth, cur.cloth, math.floor(cloth / cur.per)))
   say(("Bought %d for %s. Sold %d bandages for %s. P&L: %s."):format(

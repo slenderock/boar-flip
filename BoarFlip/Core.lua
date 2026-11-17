@@ -266,6 +266,208 @@ end
 
 function ns.heldAH() return hold end
 
+-- The window ----------------------------------------------------------------------
+-- The core window (drag it anywhere): the totals of every module, then a row per module
+-- with its P&L once all it holds is sold, its switch, and Open for its window. The open
+-- module windows dock to its left, in module order. A module gives:
+--   M.window: its window, hidden at first; def.open: open it the first time.
+--   M.Open(show): open or close it (default: just show or hide it).
+--   M.Update(): refresh it, called twice a second whether it's shown or not.
+--   M.Totals(): { spent, earned, held }, held being what the items it still has fetch.
+--   M.Gains(): { { at = GetTime(), copper }, ... }, its gains, for gold per hour.
+local WIDTH, PAD, ROW = 290, 12, 15
+local TOTALS = { "Spent", "Earned", "P&L", "When all sold", "GPH" }
+local TOP_TOTALS = -34
+local TOP_MODULES = TOP_TOTALS - ROW * #TOTALS - 12
+local MODULE_ROW = 22
+local SWITCH_W, OPEN_W = 40, 50
+local win
+local totals, rows = {}, {}
+local loginAt = GetTime()
+
+-- The look all the windows share: dark, not see-through.
+function ns.backdrop(f)
+  f:SetBackdrop({
+    bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+    edgeSize = 12,
+    insets = { left = 3, right = 3, top = 3, bottom = 3 },
+  })
+  f:SetBackdropColor(0, 0, 0, 1)
+end
+
+-- A P&L in green or red, or "-" when there's none.
+function ns.setPnl(fs, copper)
+  if not copper then
+    fs:SetText("-")
+    return fs:SetTextColor(1, 1, 1)
+  end
+  fs:SetText(signed(copper))
+  if copper < 0 then fs:SetTextColor(1, 0.45, 0.45) else fs:SetTextColor(0.45, 1, 0.45) end
+end
+
+local function dock()
+  local anchor = win
+  for _, M in ipairs(modules) do
+    local w = M.window
+    if w and w:IsShown() then
+      w:ClearAllPoints()
+      w:SetPoint("TOPRIGHT", anchor, "TOPLEFT", -4, 0)
+      anchor = w
+    end
+  end
+end
+
+-- Whether a module's window was left open (remembered), or opens the first time.
+local function leftOpen(M)
+  local open = saved(M).open
+  if open == nil then return M.open == true end
+  return open
+end
+
+local function moduleTotals(M)
+  local t = M.Totals and M.Totals()
+  if not t then return nil end
+  return { spent = t.spent or 0, earned = t.earned or 0, held = t.held or 0 }
+end
+
+-- Gold per hour: what the modules gained in the last hour, per hour, over the time since
+-- login while that's under an hour. Nothing in the first two minutes.
+local function perHour()
+  local since = GetTime() - loginAt
+  if since < 120 then return nil end
+  local sum = 0
+  for _, M in ipairs(modules) do
+    for _, g in ipairs(M.Gains and M.Gains() or {}) do
+      if GetTime() - g.at <= 3600 then sum = sum + g.copper end
+    end
+  end
+  return sum * 3600 / math.min(3600, since)
+end
+
+function ns.update()
+  for _, M in ipairs(modules) do
+    if M.Update then M.Update() end
+  end
+  if not (win and win:IsShown()) then return end
+  local spent, earned, held = 0, 0, 0
+  for _, M in ipairs(modules) do
+    local t = moduleTotals(M)
+    if t then spent, earned, held = spent + t.spent, earned + t.earned, held + t.held end
+    local r = rows[M]
+    ns.setPnl(r.value, t and (t.earned + t.held - t.spent))
+    if r.switch then r.switch:SetText(ns.switchOn(M) and "On" or "Off") end
+    r.open:SetText(M.window and M.window:IsShown() and "Close" or "Open")
+    r.open:SetEnabled(M.window ~= nil)
+  end
+  totals[1]:SetText(money(spent))
+  totals[2]:SetText(money(earned))
+  ns.setPnl(totals[3], earned - spent)
+  ns.setPnl(totals[4], earned + held - spent)
+  local gph = perHour()
+  ns.setPnl(totals[5], gph)
+  if gph then totals[5]:SetText(signed(gph) .. " /h") end
+end
+
+-- Shows or hides a module's window (only while Boar Flip is on), and remembers it.
+function ns.showWindow(M, show)
+  if not M.window then return end
+  saved(M).open = show and true or false
+  if show and ns.on then M.window:Show() else M.window:Hide() end
+  dock()
+  ns.update()
+end
+
+local function openOrClose(M)
+  local show = not (M.window and M.window:IsShown())
+  if M.Open then M.Open(show) else ns.showWindow(M, show) end
+end
+
+local function makeWindow()
+  win = CreateFrame("Frame", "BoarFlipFrame", UIParent, "BackdropTemplate")
+  win:SetSize(WIDTH, -TOP_MODULES + MODULE_ROW * #modules + 6)
+  if db.pos then
+    win:SetPoint(db.pos[1], UIParent, db.pos[2], db.pos[3], db.pos[4])
+  else
+    win:SetPoint("RIGHT", UIParent, "RIGHT", -60, 100)
+  end
+  ns.backdrop(win)
+  win:SetClampedToScreen(true)
+  win:SetMovable(true)
+  win:EnableMouse(true)
+  win:RegisterForDrag("LeftButton")
+  win:SetScript("OnDragStart", win.StartMoving)
+  win:SetScript("OnDragStop", function(self)
+    self:StopMovingOrSizing()
+    local point, _, relPoint, x, y = self:GetPoint()
+    db.pos = { point, relPoint, x, y }
+  end)
+
+  local title = win:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+  title:SetPoint("TOPLEFT", PAD, -11)
+  title:SetText("Boar Flip")
+
+  -- The game's red X turns Boar Flip off. /flip turns it on again.
+  local closeButton = CreateFrame("Button", "BoarFlipCloseButton", win, "UIPanelCloseButton")
+  closeButton:SetSize(24, 24)
+  closeButton:SetPoint("TOPRIGHT", -4, -4)
+  closeButton:SetScript("OnClick", safe(function() ns.setOn(false) end))
+
+  local function divider(y)
+    local line = win:CreateTexture(nil, "ARTWORK")
+    line:SetColorTexture(1, 1, 1, 0.12)
+    line:SetHeight(1)
+    line:SetPoint("TOPLEFT", PAD - 2, y)
+    line:SetPoint("TOPRIGHT", -(PAD - 2), y)
+  end
+  divider(TOP_TOTALS + 6)
+
+  for i, label in ipairs(TOTALS) do
+    local y = TOP_TOTALS - ROW * (i - 1)
+    local name = win:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    name:SetPoint("TOPLEFT", PAD, y)
+    name:SetText(label)
+    local value = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    value:SetPoint("TOPRIGHT", -PAD, y)
+    value:SetJustifyH("RIGHT")
+    value:SetWordWrap(false)
+    totals[i] = value
+  end
+  divider(TOP_MODULES + 6)
+
+  for i, M in ipairs(modules) do
+    local y = TOP_MODULES - MODULE_ROW * (i - 1)
+    local key = M.key:gsub("^%l", string.upper)
+    local r = {}
+    local name = win:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    name:SetPoint("TOPLEFT", PAD, y - 4)
+    name:SetText(M.title or M.key)
+    r.open = CreateFrame("Button", "BoarFlip" .. key .. "Open", win, "UIPanelButtonTemplate")
+    r.open:SetSize(OPEN_W, 18)
+    r.open:SetPoint("TOPRIGHT", -PAD, y)
+    r.open:SetScript("OnClick", safe(function() openOrClose(M) end))
+    if M.switch then
+      r.switch = CreateFrame("Button", "BoarFlip" .. key .. "Switch", win, "UIPanelButtonTemplate")
+      r.switch:SetSize(SWITCH_W, 18)
+      r.switch:SetPoint("RIGHT", r.open, "LEFT", -4, 0)
+      r.switch:SetScript("OnClick", safe(function()
+        ns.setSwitch(M, not ns.switchOn(M))
+        ns.update()
+      end))
+    end
+    r.value = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    r.value:SetPoint("TOPRIGHT", -(PAD + OPEN_W + 4 + SWITCH_W + 8), y - 4)
+    r.value:SetJustifyH("RIGHT")
+    r.value:SetWordWrap(false)
+    rows[M] = r
+  end
+
+  -- Starts off, so hidden. (db.hidden is from before there was on and off.)
+  db.hidden = nil
+  win:Hide()
+  C_Timer.NewTicker(0.5, safe(ns.update))
+end
+
 -- Searches wait while the cursor is on a Buy button, so the auction house is free the
 -- moment you click.
 local buyButtons = {}
@@ -328,11 +530,21 @@ local merchant = false
 function ns.setOn(value)
   ns.on = value
   if value then
-    ns.fire("turn", true)
+    win:Show()
+    for _, M in ipairs(modules) do
+      if M.window and leftOpen(M) then M.window:Show() end
+    end
+    dock()
+    fire("turn", true)
+    ns.update()
     say("On. /flip off or the X turns it off.")
-    ns.fire("turned on")
+    fire("turned on")
   else
-    ns.fire("turn", false)
+    fire("turn", false)
+    for _, M in ipairs(modules) do
+      if M.window then M.window:Hide() end
+    end
+    win:Hide()
     say("Off. /flip turns it on again.")
   end
 end
@@ -377,6 +589,7 @@ frame:SetScript("OnEvent", safe(function(_, event, ...)
     db = BoarFlipDB
     ns.db = db
     db.modules = db.modules or {}
+    makeWindow()
     return fire("load", db)
   elseif event == "MERCHANT_SHOW" then
     -- Before the modules: Sell starts selling right away.

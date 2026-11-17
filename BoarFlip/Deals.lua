@@ -376,6 +376,9 @@ local function account(p, bought, result, paid, before)
   local t = db.dealTotals or { bought = 0, spent = 0, worth = 0 }
   db.dealTotals = t
   t.bought, t.spent, t.worth = t.bought + p.b.qty, t.spent + paid, t.worth + worth
+  buyer.gains = buyer.gains or {}
+  table.insert(buyer.gains, { at = GetTime(), copper = worth - paid })
+  while buyer.gains[1] and GetTime() - buyer.gains[1].at > 3600 do table.remove(buyer.gains, 1) end
   p.d.bought = (p.d.bought or 0) + p.b.qty
   buyer.n, buyer.spent, buyer.worth = (buyer.n or 0) + p.b.qty, (buyer.spent or 0) + paid, (buyer.worth or 0) + worth
   say(("Bought %s%s for %s, a vendor pays %s: +%s."):format(dealName(p.d),
@@ -578,15 +581,19 @@ local function line(y, color)
   return fs
 end
 
+-- The window opens and closes through the core, which docks it.
 local function showDeals()
-  dealsFrame:Show()
+  ns.showWindow(M, true)
   updateDeals()
 end
 
 -- Closing the window cancels a purchase waiting for Confirm; one already sent finishes.
 local function hideDeals()
   if buyer.state == "confirm" then purchaseTimedOut("window closed") end
-  dealsFrame:Hide()
+  ns.showWindow(M, false)
+end
+function M.Open(show)
+  if show then showDeals() else hideDeals() end
 end
 
 local function startScan()
@@ -605,21 +612,9 @@ local function startScan()
 end
 
 local function makeDeals()
-  local win = ns.win
-  dealsFrame = CreateFrame("Frame", "BoarFlipDealsFrame", win or UIParent, "BackdropTemplate")
+  dealsFrame = CreateFrame("Frame", "BoarFlipDealsFrame", UIParent, "BackdropTemplate")
   dealsFrame:SetSize(DEAL_WIDTH, -DEAL_BOTTOM + 14 + 14 + 6 + 22 + 10)
-  if win then
-    dealsFrame:SetPoint("TOPRIGHT", win, "TOPLEFT", -4, 0)
-  else
-    dealsFrame:SetPoint("RIGHT", UIParent, "RIGHT", -360, 100)
-  end
-  dealsFrame:SetBackdrop({
-    bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
-    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-    edgeSize = 12,
-    insets = { left = 3, right = 3, top = 3, bottom = 3 },
-  })
-  dealsFrame:SetBackdropColor(0, 0, 0, 1)
+  ns.backdrop(dealsFrame)
   dealsFrame:SetClampedToScreen(true)
   dealsFrame:EnableMouse(true)
 
@@ -632,23 +627,13 @@ local function makeDeals()
   closeButton:SetPoint("TOPRIGHT", -4, -4)
   closeButton:SetScript("OnClick", safe(hideDeals))
 
-  -- Rescan, left of the X, like Pause in the main window.
+  -- Rescan, left of the X.
   dealsFrame.rescan = CreateFrame("Button", "BoarFlipRescanButton", dealsFrame, "UIPanelButtonTemplate")
   dealsFrame.rescan:SetSize(64, 18)
   dealsFrame.rescan:SetPoint("RIGHT", closeButton, "LEFT", -2, 0)
   dealsFrame.rescan:SetText("Rescan")
   dealsFrame.rescan:SetScript("OnClick", safe(startScan))
 
-  -- In the main window, left of Reset, when there is one: opens and closes this one.
-  if win and win.resetButton then
-    local open = CreateFrame("Button", "BoarFlipDealsButton", win, "UIPanelButtonTemplate")
-    open:SetSize(50, 18)
-    open:SetPoint("RIGHT", win.resetButton, "LEFT", -4, 0)
-    open:SetText("Deals")
-    open:SetScript("OnClick", safe(function()
-      if dealsFrame:IsShown() then hideDeals() else showDeals() end
-    end))
-  end
 
   dealStatus = line(-30, 0.6)
   dealEarn = line(-44)
@@ -712,6 +697,7 @@ local function makeDeals()
   ns.addBuyButton(dealBuyButton)
 
   dealsFrame:Hide()
+  M.window = dealsFrame
 end
 
 updateDeals = function()
@@ -831,7 +817,16 @@ function M.Items()
   end
   return ids
 end
-ns.updateDeals = function() updateDeals() end
+M.Update = function() updateDeals() end
+
+-- For the Boar Flip window: what Buy next spent, and what a vendor pays for it. Until
+-- vendor sales are counted, all of it counts as still held.
+function M.Totals()
+  local t = db and db.dealTotals
+  if not t then return { spent = 0, earned = 0, held = 0 } end
+  return { spent = t.spent, earned = 0, held = t.worth }
+end
+function M.Gains() return buyer.gains or {} end
 
 -- The scan, and the purchase's timeouts, before anything else; the lookups in the gaps
 -- the cloth search leaves (see ns.onTick).
@@ -860,7 +855,7 @@ ns.command("deals", function()
   showDeals()
 end)
 ns.listen("help", function()
-  say("Vendor deals: /flip scan (or Rescan) at the auction house; /flip deals or the Deals button shows them.")
+  say("Vendor deals: /flip scan (or Rescan) at the auction house; /flip deals, or Open on its line, shows them.")
 end)
 
 -- The game refused one of the addon's calls during a deal purchase.
@@ -882,6 +877,9 @@ end)
 
 ns.listen("load", function(saved)
   db = saved
+  if not db.dealsFresh then
+    db.dealTotalsOld, db.dealTotals, db.dealsFresh = db.dealTotals, nil, true
+  end
   -- A scan from before the minimum margin (or another one): drop what earns less.
   local s = db.scans and db.scans[1]
   if s and s.deals and s.margin ~= MIN_MARGIN then
