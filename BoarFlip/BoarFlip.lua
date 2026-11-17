@@ -1504,6 +1504,7 @@ local function makeWindow()
   resetButton:SetSize(56, 18)
   resetButton:SetPoint("RIGHT", pauseButton, "LEFT", -4, 0)
   resetButton:SetText("Reset")
+  win.resetButton = resetButton   -- the Deals button goes left of it (see makeDeals)
   local askedAt
   resetButton:SetScript("OnClick", safe(function(self)
     if askedAt and GetTime() - askedAt < 3 then
@@ -1583,9 +1584,10 @@ local function makeWindow()
   updateWindow()
 end
 
--- The deals window: to the left of the main one, and hidden with it. Shows the last
--- scan from the deal being bought on; hover a line for the numbers. Buy next buys one
--- purchase a click, best deal first; Skip leaves out the rest of that item.
+-- The deals window: to the left of the main one, and hidden with it; the Deals button in
+-- the main window opens and closes it. Shows the last scan from the deal being bought on;
+-- hover a line for the numbers. Rescan scans again. Buy next buys one purchase a click,
+-- best deal first; Skip leaves out the rest of that item.
 local dealsFrame, dealStatus, dealEarn, dealNext, dealBought, skipButton
 local dealRows = {}
 local DEAL_WIDTH, DEAL_ROWS = 360, 15
@@ -1659,6 +1661,33 @@ local function line(y, color)
   return fs
 end
 
+local function showDeals()
+  dealsFrame:Show()
+  updateDeals()
+end
+
+-- Closing the window cancels a purchase waiting for Confirm; one already sent finishes.
+local function hideDeals()
+  if buyer.state == "confirm" then purchaseTimedOut("window closed") end
+  dealsFrame:Hide()
+end
+
+local function startScan()
+  if not on then return say("Boar Flip is off: /flip turns it on.") end
+  if not ah.open then return say("Scanning works at the auction house.") end
+  if scan.phase then return say("Already scanning.") end
+  if busy() then return say("Wait until the purchase, mail, crafting or selling is done.") end
+  -- The offer would go stale while the cloth searching waits.
+  if ah.state == "offer" then ah.state = "idle" end
+  ah.note, ah.waiting = nil, false
+  look.running, look.want = false, nil
+  scan.phase, scan.count, scan.token, scan.pageAt, scan.wantMore = "start", 0, {}, GetTime(), false
+  say("Scanning the auction house for vendor deals. Don't search in it until it's done.")
+  showState()
+  showAge()
+  showDeals()
+end
+
 local function makeDeals()
   dealsFrame = CreateFrame("Frame", "BoarFlipDealsFrame", win, "BackdropTemplate")
   dealsFrame:SetSize(DEAL_WIDTH, -DEAL_BOTTOM + 14 + 14 + 6 + 22 + 10)
@@ -1677,13 +1706,25 @@ local function makeDeals()
   title:SetPoint("TOPLEFT", PAD, -11)
   title:SetText("Vendor deals")
 
-  -- Closing it cancels a purchase waiting for Confirm; one already sent finishes.
   local closeButton = CreateFrame("Button", nil, dealsFrame, "UIPanelCloseButton")
   closeButton:SetSize(24, 24)
   closeButton:SetPoint("TOPRIGHT", -4, -4)
-  closeButton:SetScript("OnClick", safe(function()
-    if buyer.state == "confirm" then purchaseTimedOut("window closed") end
-    dealsFrame:Hide()
+  closeButton:SetScript("OnClick", safe(hideDeals))
+
+  -- Rescan, left of the X, like Pause in the main window.
+  dealsFrame.rescan = CreateFrame("Button", "BoarFlipRescanButton", dealsFrame, "UIPanelButtonTemplate")
+  dealsFrame.rescan:SetSize(64, 18)
+  dealsFrame.rescan:SetPoint("RIGHT", closeButton, "LEFT", -2, 0)
+  dealsFrame.rescan:SetText("Rescan")
+  dealsFrame.rescan:SetScript("OnClick", safe(startScan))
+
+  -- In the main window, left of Reset: opens and closes this one.
+  local open = CreateFrame("Button", "BoarFlipDealsButton", win, "UIPanelButtonTemplate")
+  open:SetSize(50, 18)
+  open:SetPoint("RIGHT", win.resetButton, "LEFT", -4, 0)
+  open:SetText("Deals")
+  open:SetScript("OnClick", safe(function()
+    if dealsFrame:IsShown() then hideDeals() else showDeals() end
   end))
 
   dealStatus = line(-30, 0.6)
@@ -1848,27 +1889,9 @@ updateDeals = function()
     dealBuyButton:SetEnabled(false)
   end
   skipButton:SetEnabled(nxt ~= nil and not buyer.state)
-end
-
-local function showDeals()
-  dealsFrame:Show()
-  updateDeals()
-end
-
-local function startScan()
-  if not on then return say("Boar Flip is off: /flip turns it on.") end
-  if not ah.open then return say("Scanning works at the auction house.") end
-  if scan.phase then return say("Already scanning.") end
-  if busy() then return say("Wait until the purchase, mail, crafting or selling is done.") end
-  -- The offer would go stale while the cloth searching waits.
-  if ah.state == "offer" then ah.state = "idle" end
-  ah.note, ah.waiting = nil, false
-  look.running, look.want = false, nil
-  scan.phase, scan.count, scan.token, scan.pageAt, scan.wantMore = "start", 0, {}, GetTime(), false
-  say("Scanning the auction house for vendor deals. Don't search in it until it's done.")
-  showState()
-  showAge()
-  showDeals()
+  -- Scan until there's a scan, then Rescan: at the auction house, when nothing is going.
+  dealsFrame.rescan:SetText(s and "Rescan" or "Scan")
+  dealsFrame.rescan:SetEnabled(on and ah.open and not scan.phase and not busy())
 end
 
 -- /flip ----------------------------------------------------------------------
@@ -1951,7 +1974,7 @@ SlashCmdList.BOARFLIP = safe(function(msg)
     end
     if not on then say("Boar Flip is off: /flip turns it on.") end
     say("Settings: /flip max 1s90, list 1s50, free 1, pause, sound, debug, reset, off")
-    say("Vendor deals: /flip scan at the auction house, /flip deals shows the last scan.")
+    say("Vendor deals: /flip scan (or Rescan) at the auction house; /flip deals or the Deals button shows them.")
   end
 end)
 
