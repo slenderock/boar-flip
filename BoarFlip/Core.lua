@@ -168,9 +168,10 @@ ns.PAD, ns.ROW = 12, 15
 
 -- Events -----------------------------------------------------------------------
 -- ns.listen(event, fn): fn(...) runs on the game's event (upper case, registered here) or
--- on one of the addon's own (lower case, ns.fire): load (db), turn (on), scan (the scan
--- started or stopped), blocked (what), ticked, help. Listeners run in the order the
--- files load, each in safe(), so one breaking doesn't stop the others.
+-- on one of the addon's own (lower case, ns.fire): load (db), turn (on), turned on,
+-- switch (M, on), ah held (M), ah free (M), scan (its numbers changed), blocked (what),
+-- ticked, help. Listeners run in the order the files load, each in safe(), so one
+-- breaking doesn't stop the others.
 local listeners = {}
 function ns.listen(event, fn)
   local list = listeners[event]
@@ -187,15 +188,83 @@ local function fire(event, ...)
 end
 ns.fire = fire
 
--- Something going on that a scan or a switch of flip must wait for: any module's check.
-local busyChecks = {}
-function ns.addBusy(fn) busyChecks[#busyChecks + 1] = fn end
+-- Modules -----------------------------------------------------------------------
+-- ns.module(key, def) registers one: def.title, def.order (place in the window), and
+--   def.switch: it has work in the background (a search, selling by itself), which its
+--     switch turns on and off, saved in BoarFlipDB.modules[key].on. Clicks always work.
+--   def.Busy(): something going on that a scan or a switch of flip must wait for.
+--   def.Purchasing(): it has an auction house purchase going (see the lock below).
+--   def.OnSwitch(on): its switch was turned.
+-- Each module works without the others: they meet only here.
+local modules = {}
+function ns.module(key, def)
+  def.key = key
+  modules[#modules + 1] = def
+  table.sort(modules, function(a, b) return (a.order or 99) < (b.order or 99) end)
+  return def
+end
+ns.modules = modules
+
+local function saved(M)
+  local all = db.modules or {}
+  db.modules = all
+  all[M.key] = all[M.key] or {}
+  return all[M.key]
+end
+
+-- The module's switch, whatever the session: on unless turned off.
+function ns.switchOn(M)
+  return not M.switch or saved(M).on ~= false
+end
+
+-- Whether its background work may run now: Boar Flip is on and so is its switch.
+function ns.active(M)
+  return ns.on and ns.switchOn(M)
+end
+
+function ns.setSwitch(M, value)
+  saved(M).on = value and true or false
+  if M.OnSwitch then M.OnSwitch(value) end
+  fire("switch", M, value)
+end
+
 function ns.busy()
-  for _, fn in ipairs(busyChecks) do
-    if fn() then return true end
+  for _, M in ipairs(modules) do
+    if M.Busy and M.Busy() then return true end
   end
   return false
 end
+
+-- One purchase at a time across the modules: the game's commodity answers don't say
+-- which purchase they're for. The module with a purchase going holds the lock.
+function ns.lockedBy()
+  for _, M in ipairs(modules) do
+    if M.Purchasing and M.Purchasing() then return M end
+  end
+end
+
+function ns.lockedByOther(M)
+  local by = ns.lockedBy()
+  return by ~= nil and by ~= M
+end
+
+-- A module can hold the auction house to itself (the scan, while it pages): the others
+-- don't send anything meanwhile. hold.wait says what they wait for ("the scan") and
+-- hold.status() the line to show. Letting go fires "ah free".
+local hold
+function ns.holdAH(M, info)
+  hold = info
+  hold.module = M
+  fire("ah held", M)
+end
+
+function ns.releaseAH(M)
+  if not hold or hold.module ~= M then return end
+  hold = nil
+  fire("ah free", M)
+end
+
+function ns.heldAH() return hold end
 
 -- Searches wait while the cursor is on a Buy button, so the auction house is free the
 -- moment you click.
@@ -209,24 +278,47 @@ function ns.mouseOnBuy()
 end
 
 -- The auction house ticker, ten times a second while it's open. Each module's tick gets
--- free (no message has gone out this tick yet) and returns true when it sent one, or
--- holds the auction house (the scan paging). In order: the scan, the cloth search, the
--- deals' lookups in the gaps between cloth searches.
+-- free: nothing has gone out this tick yet, and no other module holds the auction house.
+-- It returns true when it sent something (or is paging, like the scan). In order: the
+-- scan and the purchases' timeouts, the cloth search, the deals' lookups in the gaps.
 local ticks, ticker = {}, nil
-function ns.onTick(order, fn)
-  ticks[#ticks + 1] = { order = order, fn = fn }
+function ns.onTick(M, order, fn)
+  ticks[#ticks + 1] = { module = M, order = order, fn = fn }
   table.sort(ticks, function(a, b) return a.order < b.order end)
 end
 
 local function tick()
   -- Kept for the log: whether the game would send a message right now.
   ah.ready = C_AuctionHouse.IsThrottledMessageSystemReady()
-  local free = true
+  local sent = false
   for _, t in ipairs(ticks) do
-    if t.fn(free) then free = false end
+    local free = not sent and (not hold or hold.module == t.module)
+    if t.fn(free) then sent = true end
   end
   fire("ticked")
 end
+
+-- Bag counts at a vendor, while debugging: what each module's items do when sold (by
+-- Sell or by hand), to check before counting vendor sales by them. M.Items() lists a
+-- module's item IDs.
+local bagCounts = {}
+local function logBags(when)
+  if not (db and db.debug) then return end
+  local changed = {}
+  for _, M in ipairs(modules) do
+    for _, id in ipairs(M.Items and M.Items() or {}) do
+      local n = C_Item and C_Item.GetItemCount and C_Item.GetItemCount(id) or GetItemCount(id)
+      if n ~= bagCounts[id] then
+        changed[#changed + 1] = ("%s %d %s->%d"):format(M.key, id, tostring(bagCounts[id]), n)
+        bagCounts[id] = n
+      end
+    end
+  end
+  if #changed > 0 or when ~= "bags" then
+    log("vendor", when, "gold", GetMoney(), table.concat(changed, ", "))
+  end
+end
+local merchant = false
 
 -- On and off -------------------------------------------------------------------
 -- On shows the window and starts searching if the auction house is open (a vendor
@@ -284,7 +376,18 @@ frame:SetScript("OnEvent", safe(function(_, event, ...)
     BoarFlipDB = BoarFlipDB or {}
     db = BoarFlipDB
     ns.db = db
+    db.modules = db.modules or {}
     return fire("load", db)
+  elseif event == "MERCHANT_SHOW" then
+    -- Before the modules: Sell starts selling right away.
+    merchant, bagCounts = true, {}
+    logBags("open")
+  elseif event == "MERCHANT_CLOSED" then
+    merchant = false
+    logBags("closed")
+  elseif event == "BAG_UPDATE_DELAYED" then
+    if merchant then logBags("bags") end
+    return fire(event, ...)
   elseif event == "AUCTION_HOUSE_SHOW" then
     ah.open = true
     if ticker then ticker:Cancel() end
@@ -302,6 +405,6 @@ frame:SetScript("OnEvent", safe(function(_, event, ...)
   fire(event, ...)
 end))
 for _, event in ipairs({ "ADDON_LOADED", "AUCTION_HOUSE_SHOW", "AUCTION_HOUSE_CLOSED",
-  "ADDON_ACTION_BLOCKED", "ADDON_ACTION_FORBIDDEN" }) do
+  "ADDON_ACTION_BLOCKED", "ADDON_ACTION_FORBIDDEN", "MERCHANT_SHOW", "MERCHANT_CLOSED", "BAG_UPDATE_DELAYED" }) do
   pcall(frame.RegisterEvent, frame, event)
 end

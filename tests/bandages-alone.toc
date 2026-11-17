@@ -1,0 +1,3 @@
+## Core and Bandages only: Bandages works without Deals.
+Core.lua
+Bandages.lua

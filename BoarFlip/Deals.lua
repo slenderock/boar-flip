@@ -12,6 +12,9 @@ local GetItemInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
 
 local db   -- the saved settings
 
+-- The module. No switch: everything it does follows a scan you clicked.
+local M = ns.module("deals", { title = "Vendor deals", order = 2 })
+
 -- /flip scan (see below). phase: start (search not sent yet), paging,
 -- pricing, or nil when no scan is going.
 local scan = {}
@@ -44,12 +47,8 @@ local SETTLE_WAIT, ERROR_WAIT = 2, 3   -- seconds for the gold after the game's 
 local BUYS_KEPT = 50        -- purchases kept in BoarFlipDB.buys
 local MIN_MARGIN = 20       -- copper a vendor must pay over the price, per item; less isn't worth it
 
-local function resumeSearch()
-  ah.note, ah.lastAt, ah.seen, ah.openedAt = nil, 0, false, GetTime()
-end
-
 local function stopScan(text)
-  if scanning() then resumeSearch() end
+  ns.releaseAH(M)
   scan.phase, scan.token, scan.wantMore = nil, nil, nil
   if text then say(text) end
   ns.fire("scan")
@@ -145,7 +144,7 @@ end
 -- the game hasn't loaded yet are asked for and looked at again for a few seconds.
 local function priceResults(results)
   scan.phase, scan.wantMore = "pricing", nil
-  resumeSearch()
+  ns.releaseAH(M)
   local token = scan.token
   local deals, later, i, waitFrom = {}, {}, 1, nil
   local added = {}   -- item keys already in deals: the pages can bring one twice
@@ -358,7 +357,7 @@ end
 -- Whether the Buy next button may buy now.
 local function canBuyDeal()
   return ns.on and ah.open and not scanning() and not buyer.state and not buyer.halted
-    and (ah.state == "idle" or ah.state == "offer")
+    and not ns.lockedByOther(M)
 end
 
 local function dealName(d)
@@ -545,9 +544,10 @@ local function onDealBuy()
   -- A refusal comes during the call (the "blocked" listeners), so the flags are cleared before it.
   local blocked
   if p.d.kind == "commodity" then
-    ah.startBlocked = nil
+    buyer.startBlocked, buyer.calling = nil, true
     C_AuctionHouse.StartCommoditiesPurchase(p.d.id, p.b.qty)
-    blocked = ah.startBlocked
+    buyer.calling = nil
+    blocked = buyer.startBlocked
     buyer.state = "quoting"
   else
     buyer.bidBlocked = nil
@@ -594,11 +594,11 @@ local function startScan()
   if not ah.open then return say("Scanning works at the auction house.") end
   if scan.phase then return say("Already scanning.") end
   if ns.busy() then return say("Wait until the purchase, mail, crafting or selling is done.") end
-  -- The offer would go stale while the cloth searching waits.
-  if ah.state == "offer" then ah.state = "idle" end
-  ah.note, ah.waiting = nil, false
   look.running, look.want = false, nil
   scan.phase, scan.count, scan.token, scan.pageAt, scan.wantMore = "start", 0, {}, GetTime(), false
+  ns.holdAH(M, { wait = "the scan", status = function()
+    return ("Scanning for vendor deals: %d items so far"):format(scan.count or 0)
+  end })
   say("Scanning the auction house for vendor deals. Don't search in it until it's done.")
   ns.fire("scan")
   showDeals()
@@ -606,9 +606,13 @@ end
 
 local function makeDeals()
   local win = ns.win
-  dealsFrame = CreateFrame("Frame", "BoarFlipDealsFrame", win, "BackdropTemplate")
+  dealsFrame = CreateFrame("Frame", "BoarFlipDealsFrame", win or UIParent, "BackdropTemplate")
   dealsFrame:SetSize(DEAL_WIDTH, -DEAL_BOTTOM + 14 + 14 + 6 + 22 + 10)
-  dealsFrame:SetPoint("TOPRIGHT", win, "TOPLEFT", -4, 0)
+  if win then
+    dealsFrame:SetPoint("TOPRIGHT", win, "TOPLEFT", -4, 0)
+  else
+    dealsFrame:SetPoint("RIGHT", UIParent, "RIGHT", -360, 100)
+  end
   dealsFrame:SetBackdrop({
     bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
     edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
@@ -635,14 +639,16 @@ local function makeDeals()
   dealsFrame.rescan:SetText("Rescan")
   dealsFrame.rescan:SetScript("OnClick", safe(startScan))
 
-  -- In the main window, left of Reset: opens and closes this one.
-  local open = CreateFrame("Button", "BoarFlipDealsButton", win, "UIPanelButtonTemplate")
-  open:SetSize(50, 18)
-  open:SetPoint("RIGHT", win.resetButton, "LEFT", -4, 0)
-  open:SetText("Deals")
-  open:SetScript("OnClick", safe(function()
-    if dealsFrame:IsShown() then hideDeals() else showDeals() end
-  end))
+  -- In the main window, left of Reset, when there is one: opens and closes this one.
+  if win and win.resetButton then
+    local open = CreateFrame("Button", "BoarFlipDealsButton", win, "UIPanelButtonTemplate")
+    open:SetSize(50, 18)
+    open:SetPoint("RIGHT", win.resetButton, "LEFT", -4, 0)
+    open:SetText("Deals")
+    open:SetScript("OnClick", safe(function()
+      if dealsFrame:IsShown() then hideDeals() else showDeals() end
+    end))
+  end
 
   dealStatus = line(-30, 0.6)
   dealEarn = line(-44)
@@ -812,16 +818,24 @@ updateDeals = function()
   dealsFrame.rescan:SetEnabled(ns.on and ah.open and not scan.phase and not ns.busy())
 end
 
--- For the other modules: whether the scan is paging, and a deal purchase going.
-function ns.scanning() return scanning() end
-function ns.scanCount() return scan.count or 0 end
-function ns.dealBuying() return buyer.state ~= nil end
-ns.addBusy(function() return buyer.state ~= nil end)
+function M.Busy() return buyer.state ~= nil end
+function M.Purchasing() return buyer.state ~= nil end
+-- The items bought, to watch at a vendor.
+function M.Items()
+  local ids, seen = {}, {}
+  for _, b in ipairs(db and db.buys or {}) do
+    if b.result and b.result:find("^bought") and not seen[b.id] then
+      seen[b.id] = true
+      ids[#ids + 1] = b.id
+    end
+  end
+  return ids
+end
 ns.updateDeals = function() updateDeals() end
 
 -- The scan, and the purchase's timeouts, before anything else; the lookups in the gaps
 -- the cloth search leaves (see ns.onTick).
-ns.onTick(1, function()
+ns.onTick(M, 1, function()
   if scanning() then
     scanPage()
     return true
@@ -829,7 +843,7 @@ ns.onTick(1, function()
   buyerTimeouts()
   return false
 end)
-ns.onTick(3, function(free)
+ns.onTick(M, 3, function(free)
   if free and ns.on then lookStep() end
 end)
 
@@ -851,8 +865,9 @@ end)
 
 -- The game refused one of the addon's calls during a deal purchase.
 ns.listen("blocked", function(what)
-  if what:find("StartCommoditiesPurchase") and buyer.state == "quoting" then
-    endPurchase(false, "The game blocked Boar Flip from buying.")
+  if what:find("StartCommoditiesPurchase") and (buyer.calling or buyer.state == "quoting") then
+    buyer.startBlocked = true
+    if buyer.state == "quoting" then endPurchase(false, "The game blocked Boar Flip from buying.") end
   elseif what:find("PlaceBid") then
     buyer.bidBlocked = true
     if buyer.state == "bidding" then endPurchase(false, "The game blocked Boar Flip from buying.") end

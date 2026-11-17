@@ -2,7 +2,7 @@
 ## Title: Boar Flip
 ## Notes: Buy cloth on the auction house, craft First Aid bandages and sell them to a vendor: one window with the totals and a button for each step. Off at login: /flip turns it on. /flip scan finds what sells to a vendor for more than it costs.
 ## Author: Mottled Boar Daycare
-## Version: 2.8
+## Version: 2.9
 ## SavedVariables: BoarFlipDB
 
 Core.lua

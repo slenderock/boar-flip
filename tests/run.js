@@ -17,8 +17,14 @@ let dumpDir = null;
 const dumpAt = args.indexOf('--dump');
 if (dumpAt >= 0) { dumpDir = path.resolve(args[dumpAt + 1]); args.splice(dumpAt, 2); fs.mkdirSync(dumpDir, { recursive: true }); }
 const addonDir = path.join(__dirname, '..', 'BoarFlip');
-const files = fs.readFileSync(toc, 'utf8').split(/\r?\n/).map(s => s.trim())
+const tocFiles = file => fs.readFileSync(file, 'utf8').split(/\r?\n/).map(s => s.trim())
   .filter(s => s && !s.startsWith('#') && s.endsWith('.lua'));
+// A scenario can name its own .toc on its first line ("-- toc: deals-alone.toc", next to
+// it), to load only some of the files.
+function scenarioToc(file) {
+  const m = fs.readFileSync(file, 'utf8').match(/^-- toc: (\S+)/);
+  return m ? path.join(path.dirname(file), m[1]) : toc;
+}
 const scenarios = args.length ? args.map(a => path.resolve(a))
   : fs.readdirSync(__dirname).filter(f => /^scenario-.*\.lua$/.test(f)).sort().map(f => path.join(__dirname, f));
 
@@ -79,11 +85,12 @@ function failures(L) {
 
 let failed = 0;
 for (const s of scenarios) {
-  console.log('== ' + path.basename(s) + (tocAt >= 0 ? ' (' + path.basename(toc) + ')' : ''));
+  const sToc = scenarioToc(s);
+  console.log('== ' + path.basename(s) + (sToc !== path.join(__dirname, '..', 'BoarFlip', 'BoarFlip.toc') ? ' (' + path.basename(sToc) + ')' : ''));
   const L = newGame();
   try {
     run(L, path.join(__dirname, 'wowmock.lua'), false);
-    for (const f of files) run(L, path.join(addonDir, f), true);
+    for (const f of tocFiles(sToc)) run(L, path.join(addonDir, f), true);
     run(L, s, false);
     failed += failures(L);
     if (dumpDir) dump(L, path.join(dumpDir, path.basename(s, '.lua') + '.txt'));

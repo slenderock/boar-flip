@@ -26,6 +26,8 @@ npm test
   - **deals:** a scan, then Buy next against the purchase answers seen in the game's log.
   - **bandages:** search, Buy, Open mail, Craft and Sell.
   - **smoke:** every event, button and slash command, checked for errors.
+  - **modules:** the Bandages switch, the purchase lock between modules, and the scan holding the auction house.
+  - **deals-alone and bandages-alone:** each module with only `Core.lua` loaded, through `deals-alone.toc` and `bandages-alone.toc`. A scenario can name its own `.toc` on its first line (`-- toc: ...`).
 
   `node run.js scenario-deals.lua` runs one scenario. `--toc other.toc` loads a different set of files.
 

@@ -18,6 +18,11 @@ local findUnlocked, freeSlots, slotsNeeded = ns.findUnlocked, ns.freeSlots, ns.s
 local ah, cancelPurchase, PRICE_SORT = ns.ah, ns.cancelPurchase, ns.PRICE_SORT
 local BAGS, PAD, ROW = ns.BAGS, ns.PAD, ns.ROW
 
+-- The module. Its switch is the cloth search and selling by itself at a vendor (it was
+-- Pause before): off, Buy has no offer, but Open mail, Craft, Sell and List still work.
+local M = ns.module("bandages", { title = "Bandages", order = 1, switch = true })
+local function paused() return not ns.switchOn(M) end
+
 local FIRST_AID = 129       -- profession skill line
 local REFRESH = 2           -- seconds between auction house searches
 local BITE_SOUND = 569816   -- sound/spells/tradeskills/fishbite.ogg, the fishing bite splash
@@ -136,11 +141,12 @@ local buyButton, listButton, pauseButton, note, age
 -- The line under the totals: shows each search going out and how fresh the numbers are.
 local function showAge()
   if not age then return end
-  if ns.scanning() then
-    age:SetText(("Scanning for vendor deals: %d items so far"):format(ns.scanCount()))
+  local held = ns.heldAH()
+  if held and held.module ~= M then
+    age:SetText(held.status and held.status() or ("Waiting for " .. (held.wait or "the auction house")))
   elseif not ah.open and ah.state ~= "buying" then
     age:SetText("Auction house closed")
-  elseif db.paused and ah.state == "idle" then
+  elseif paused() and ah.state == "idle" then
     age:SetText("Searching paused")
   elseif ah.state ~= "idle" and ah.state ~= "offer" then
     age:SetText("Searching paused while buying")
@@ -156,15 +162,15 @@ end
 local function showState()
   if not buyButton then return end
   local s = ah.state
-  local paused = db.paused and s == "idle"
+  local off = paused() and s == "idle"
   local max = maxPrice(cur)
-  pauseButton:SetText(db.paused and "Resume" or "Pause")
+  pauseButton:SetText(paused() and "Resume" or "Pause")
   if not ah.open and s ~= "buying" then
     buyButton:SetText("Buy (at the auction house)")
-  elseif paused then
+  elseif off then
     buyButton:SetText("Buy (searching paused)")
-  elseif ns.scanning() and s == "idle" then
-    buyButton:SetText("Buy (waiting for the scan)")
+  elseif ns.heldAH() and s == "idle" then
+    buyButton:SetText("Buy (waiting for " .. (ns.heldAH().wait or "the auction house") .. ")")
   elseif s == "offer" then
     buyButton:SetText(("Buy %d for %s"):format(ah.qty, money(ah.total)))
   elseif s == "confirm" then
@@ -177,7 +183,7 @@ local function showState()
     buyButton:SetText("Searching...")
   end
   -- Off while a vendor deal is being bought: the game's answers don't say which purchase they're for.
-  buyButton:SetEnabled(ah.open and (s == "offer" or s == "confirm") and not ns.dealBuying())
+  buyButton:SetEnabled(ah.open and (s == "offer" or s == "confirm") and not ns.lockedByOther(M))
 
   local price = listing.price
   if not ah.open then
@@ -196,7 +202,7 @@ local function showState()
   elseif not max then
     note:SetText("Waiting for the game to load the bandage price.")
   else
-    note:SetText(paused and "Not searching. Click Resume to start again." or ah.note or "")
+    note:SetText(off and "Not searching. Click Resume to start again." or ah.note or "")
   end
 end
 
@@ -253,7 +259,7 @@ end
 
 local function onResults()
   -- Off, or paused: other addons' searches for this cloth land here too, so ignore them.
-  if not ns.on or db.paused then
+  if not ns.active(M) then
     ah.waiting = false
     return
   end
@@ -298,7 +304,7 @@ end
 -- REFRESH seconds after the last answer, unless a search is on its way or a purchase is
 -- going. True when it sent one.
 local function clothSearch()
-  if not ns.on or db.paused or (ah.state ~= "idle" and ah.state ~= "offer") or ns.dealBuying() then return false end
+  if not ns.active(M) or (ah.state ~= "idle" and ah.state ~= "offer") or ns.lockedByOther(M) then return false end
   if not ah.seen and not ah.note and GetTime() - ah.openedAt > 10 then
     ah.note = "No answer from the auction house yet."
     showState()
@@ -319,16 +325,17 @@ local function clothSearch()
 end
 
 
--- Pause stops the searching (and drops the offer, which would go stale). It is
--- remembered until Resume. A purchase already going finishes first.
-local function setPaused(on)
-  db.paused = on or nil
+-- The switch (Pause): off stops the searching (and drops the offer, which would go stale)
+-- and the selling by itself at a vendor. It is remembered. A purchase already going
+-- finishes first.
+function M.OnSwitch(on)
   if ah.state == "offer" then ah.state = "idle" end
   ah.note, ah.lastAt = nil, 0
-  if not on then ah.seen, ah.openedAt = false, GetTime() end
+  if on then ah.seen, ah.openedAt = false, GetTime() end
   showState()
   showAge()
 end
+local function setPaused(value) ns.setSwitch(M, not value) end
 
 local function confirm()
   local auto = ah.state == "quoting"
@@ -349,10 +356,13 @@ end
 local BLOCKED = "The game blocked Boar Flip from starting the purchase."
 
 local function onBuy()
+  -- Another module's purchase going: its answers would be taken for this one's.
+  if ns.lockedByOther(M) then return end
   if ah.state == "offer" then
     -- The very first thing the click does: the game only allows this straight from a click.
-    ah.startBlocked = nil
+    ah.startBlocked, ah.calling = nil, true
     C_AuctionHouse.StartCommoditiesPurchase(ah.flip.buy, ah.qty)
+    ah.calling = nil
     log("click: StartCommoditiesPurchase", ah.flip.buy, ah.qty, "total", ah.total, "gold", GetMoney(),
       "searchOut", ah.waiting, "resultsAge", ah.checkedAt and ("%.1f"):format(GetTime() - ah.checkedAt),
       "ready before", ah.ready, "blocked", ah.startBlocked)
@@ -368,7 +378,7 @@ end
 -- Key binding (Options > Keybindings > Boar Flip, see Bindings.xml): same as Buy.
 BINDING_NAME_BOARBANDAGES_BUY = "Buy"
 function BoarFlip_Buy()
-  if not ns.on or ns.dealBuying() then return end
+  if not ns.on or ns.lockedByOther(M) then return end
   onBuy()
 end
 
@@ -731,9 +741,15 @@ local mailButton, craftButton, sellButton
 
 -- The picker is locked while something is going on for the flip it shows (here or in
 -- another module: ns.busy).
-ns.addBusy(function()
+function M.Busy()
   return (ah.state ~= "idle" and ah.state ~= "offer") or mail.taking or selling ~= nil or craft.watch ~= nil
-end)
+end
+function M.Purchasing()
+  return ah.state == "quoting" or ah.state == "confirm" or ah.state == "buying"
+end
+function M.Items()
+  return cur and { cur.buy, cur.make } or {}
+end
 local busy = ns.busy
 
 -- The totals, one per row: label on the left, value on the right, never wrapping.
@@ -873,7 +889,7 @@ local function makeWindow()
   pauseButton = CreateFrame("Button", nil, win, "UIPanelButtonTemplate")
   pauseButton:SetSize(64, 18)
   pauseButton:SetPoint("RIGHT", closeButton, "LEFT", -2, 0)
-  pauseButton:SetScript("OnClick", safe(function() setPaused(not db.paused) end))
+  pauseButton:SetScript("OnClick", safe(function() setPaused(not paused()) end))
 
   -- Reset the totals of the flip shown: a second click within 3 seconds does it.
   local resetButton = CreateFrame("Button", "BoarFlipResetButton", win, "UIPanelButtonTemplate")
@@ -978,10 +994,25 @@ ns.listen("turn", function(value)
   end
 end)
 ns.listen("turned on", function()
-  if db.paused then say("Searching is still paused: Resume or /flip pause starts it.") end
+  if paused() then say("Searching is still paused: Resume or /flip pause starts it.") end
 end)
 
--- The scan started or stopped: the auction house line and Buy say so.
+-- Another module (the scan) takes the auction house: the offer would go stale while the
+-- search waits. When it lets go, the search starts again straight away.
+ns.listen("ah held", function(by)
+  if by == M then return end
+  if ah.state == "offer" then ah.state = "idle" end
+  ah.note, ah.waiting = nil, false
+  showState()
+  showAge()
+end)
+ns.listen("ah free", function(by)
+  if by == M then return end
+  ah.note, ah.lastAt, ah.seen, ah.openedAt = nil, 0, false, GetTime()
+  showState()
+  showAge()
+end)
+-- The scan's numbers changed: the auction house line shows them.
 ns.listen("scan", function()
   showState()
   showAge()
@@ -989,7 +1020,7 @@ end)
 ns.listen("ticked", showAge)
 
 -- The cloth search, after the scan and before the deals' lookups (see ns.onTick).
-ns.onTick(2, function(free)
+ns.onTick(M, 2, function(free)
   return free and clothSearch()
 end)
 
@@ -1028,8 +1059,8 @@ ns.command("sound", function()
   end
 end)
 ns.command("pause", function()
-  setPaused(not db.paused)
-  say(db.paused and "Searching paused." or "Searching again.")
+  setPaused(not paused())
+  say(paused() and "Searching paused." or "Searching again.")
 end)
 ns.command("auto", function()
   db.clickToConfirm = nil
@@ -1044,7 +1075,7 @@ ns.listen("help", function()
     cur.cloth, cur.bandage, max and money(max) or "?", list and money(list) or "?"))
   say(("Open mail keeps %d bag slot(s) free. Purchases are confirmed %s."):format(
     db.free, db.clickToConfirm and "with a second click" or "automatically"))
-  if db.paused then say("Auction house searching is paused (/flip pause starts it again).") end
+  if paused() then say("Auction house searching is paused (/flip pause starts it again).") end
   local cloth = GetItemCount(cur.buy)
   say(("In your bags: %d %s, enough for %d bandages."):format(cloth, cur.cloth, math.floor(cloth / cur.per)))
   say(("Bought %d for %s. Sold %d bandages for %s. P&L: %s."):format(
@@ -1056,16 +1087,16 @@ ns.listen("help", function()
   say("Settings: /flip max 1s90, list 1s50, free 1, pause, sound, debug, reset, off")
 end)
 
--- The game refused one of the addon's calls. (A deal purchase's are Deals.lua's: the
--- cloth's purchase can't be going at the same time.)
+-- The game refused one of the addon's calls: these are the cloth's when its call is going
+-- or it holds the purchase lock (another module's are theirs).
 ns.listen("blocked", function(what)
-  if what:find("StartCommoditiesPurchase") and not ns.dealBuying() then
+  if what:find("StartCommoditiesPurchase") and (ah.calling or ah.state == "quoting") then
     ah.startBlocked = true
     if ah.state == "quoting" then backToSearch(BLOCKED) end
   elseif what:find("PostCommodity") then
     listing.blocked = true
     say("The game blocked Boar Flip from listing.")
-  elseif what:find("ConfirmCommoditiesPurchase") and not ns.dealBuying() then
+  elseif what:find("ConfirmCommoditiesPurchase") and ah.state == "buying" then
     -- From now on, ask for a click to confirm instead.
     if ah.state ~= "buying" then return end
     db.clickToConfirm = true
@@ -1090,6 +1121,12 @@ ns.listen("load", function(saved)
     db.mail[4306] = db.mailSilk
     db.spent, db.bought, db.earned, db.sold, db.max, db.mailSilk, db.version = nil, nil, nil, nil, nil, nil, nil
   end
+  -- Pause, from before the switch: paused is the switch off.
+  if db.paused ~= nil then
+    db.modules.bandages = db.modules.bandages or {}
+    db.modules.bandages.on = not db.paused
+    db.paused = nil
+  end
   cur = FLIPS[db.flip] or FLIPS.heavysilk
   db.flip = cur.key
   loadItems(cur)
@@ -1107,7 +1144,7 @@ ns.listen("load", function(saved)
 end)
 
 ns.listen("AUCTION_HOUSE_SHOW", function()
-  log("auction house open. flip", cur.key, "max", maxPrice(cur), "gold", GetMoney(), "paused", db.paused)
+  log("auction house open. flip", cur.key, "max", maxPrice(cur), "gold", GetMoney(), "paused", paused())
   ah.state, ah.note, ah.seen, ah.waiting, ah.lastAt, ah.openedAt = "idle", nil, false, false, 0, GetTime()
   ah.checkedAt = nil
   updateWindow()
@@ -1119,9 +1156,9 @@ ns.listen("AUCTION_HOUSE_CLOSED", function()
   updateWindow()
 end)
 
--- The auction house's answers. While a deal is being bought, the commodity answers are
--- its (Deals.lua): the cloth's Buy is off meanwhile.
-local DEAL_ANSWERS = { COMMODITY_PRICE_UPDATED = true, COMMODITY_PRICE_UNAVAILABLE = true,
+-- The auction house's answers. While another module has a purchase going, the commodity
+-- answers are its: the cloth's Buy is off meanwhile.
+local PURCHASE_ANSWERS = { COMMODITY_PRICE_UPDATED = true, COMMODITY_PRICE_UNAVAILABLE = true,
   COMMODITY_PURCHASE_SUCCEEDED = true, COMMODITY_PURCHASE_FAILED = true }
 for _, event in ipairs({ "COMMODITY_SEARCH_RESULTS_UPDATED", "COMMODITY_PRICE_UPDATED", "COMMODITY_PRICE_UNAVAILABLE",
   "COMMODITY_PURCHASE_SUCCEEDED", "COMMODITY_PURCHASE_FAILED",
@@ -1130,7 +1167,7 @@ for _, event in ipairs({ "COMMODITY_SEARCH_RESULTS_UPDATED", "COMMODITY_PRICE_UP
   "AUCTION_HOUSE_THROTTLED_MESSAGE_QUEUED", "AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED",
   "AUCTION_HOUSE_THROTTLED_SYSTEM_READY" }) do
   ns.listen(event, function(...)
-    if DEAL_ANSWERS[event] and ns.dealBuying() then return end
+    if PURCHASE_ANSWERS[event] and ns.lockedByOther(M) then return end
     onAuctionEvent(event, ...)
   end)
 end
@@ -1149,7 +1186,7 @@ ns.listen("MAIL_CLOSED", function()
 end)
 ns.listen("MERCHANT_SHOW", function()
   merchantOpen = true
-  if ns.on then sellBandages(false) end
+  if ns.active(M) then sellBandages(false) end
   updateWindow()
 end)
 ns.listen("MERCHANT_CLOSED", function()
