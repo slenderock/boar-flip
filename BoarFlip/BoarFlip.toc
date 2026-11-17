@@ -2,7 +2,7 @@
 ## Title: Boar Flip
 ## Notes: Gold-making modules around one window of totals. Bandages: buy cloth on the auction house, craft First Aid bandages, sell them to a vendor. Vendor deals: /flip scan finds what sells to a vendor for more than it costs. Disenchant: what gear in the scan would fetch disenchanted. Off at login: /flip turns it on.
 ## Author: Mottled Boar Daycare
-## Version: 2.12
+## Version: 2.13
 ## SavedVariables: BoarFlipDB
 
 Core.lua

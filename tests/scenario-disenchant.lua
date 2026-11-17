@@ -8,6 +8,7 @@ mock.items[7444] = { name = "Sentinel Boots", sell = 2500, quality = 3, level = 
 mock.items[9900] = { name = "Ghostwalker Pads", sell = 2000, quality = 2, level = 43, class = 4, equip = "INVTYPE_FEET" }
 mock.items[9901] = { name = "Grey Hat", sell = 100, quality = 0, level = 38, class = 4, equip = "INVTYPE_HEAD" }
 mock.items[9902] = { name = "Green Shirt", sell = 100, quality = 2, level = 38, class = 4, equip = "INVTYPE_BODY" }
+mock.items[11288] = { name = "Greater Magic Wand", sell = 400, quality = 2, level = 23, class = 2, equip = "INVTYPE_RANGEDRIGHT" }
 mock.items[11137] = { name = "Vision Dust", sell = 0, stack = 20 }
 mock.items[11135] = { name = "Greater Mystic Essence", sell = 0, stack = 10 }
 mock.items[11139] = { name = "Large Glowing Shard", sell = 0, stack = 20 }
@@ -25,7 +26,7 @@ local function scanWith(start)
     row(5213, 0, 5000),
     row(7046, 38, 5000), row(7046, 38, 5000),   -- the pages can bring one twice
     row(3201, 38, 30000), row(7444, 40, 20000), row(9900, 43, 10000),
-    row(9901, 38, 10), row(9902, 38, 10),
+    row(9901, 38, 10), row(9902, 38, 10), row(11288, 23, 210, 305),
     row(11137, 0, 10000, 50), row(11135, 0, 20000, 10), row(11139, 0, 30000, 5),
   }
   mock.ah.full = true
@@ -42,7 +43,7 @@ scanWith(function() mock.slash("scan") end)
 check(BoarFlipDealsFrame:IsShown() and not BoarFlipDisenchantFrame:IsShown(), "/flip scan opens Deals, not Disenchant")
 check(mock.said("Buy all: 1 purchases"), "Deals reads the same scan")
 local d = BoarFlipDB.disenchant
-check(d and d.gear == 4, "4 gear items: not the grey, the shirt or the wand, the cowl once (" .. tostring(d and d.gear) .. ")")
+check(d and d.gear == 4, "4 gear items: not the grey, the shirt, the Scorching Wand or the Greater Magic Wand, the cowl once (" .. tostring(d and d.gear) .. ")")
 check(d.found == 3, "3 under their value: not the axe (" .. tostring(d.found) .. ")")
 -- Pads (43, armor): 75% x3.5 dust at 1g, no essence or shard listed: 26250 less 5% = 24937, for 1g.
 -- Cowl (38, armor): 75% x1.5 at 1g + 20% x1.5 at 2g + 5% at 3g = 18750, less 5% = 17812, for 50s.

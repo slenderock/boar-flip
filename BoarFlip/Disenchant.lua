@@ -53,6 +53,9 @@ local FROM = 5   -- gear under this item level doesn't disenchant
 -- Gear that can't be disenchanted.
 local NOT_GEAR = { INVTYPE_BODY = true, INVTYPE_TABARD = true, INVTYPE_BAG = true, INVTYPE_QUIVER = true,
   INVTYPE_AMMO = true }
+-- Gear that doesn't disenchant, by item ID (the game doesn't say which): the wands
+-- Enchanting makes, Lesser and Greater Magic, Lesser and Greater Mystic.
+local NO_DISENCHANT = { [11287] = true, [11288] = true, [11289] = true, [11290] = true }
 
 local prices = {}   -- the last check's material prices: id -> { price, qty }
 local updateWindow  -- the window, made further down
@@ -68,7 +71,7 @@ end
 -- nil when the item doesn't disenchant (not green or blue gear, or past the table).
 local function partsOf(e)
   if not (e.quality == 2 or e.quality == 3) or not (e.class == 2 or e.class == 4) then return nil end
-  if not e.equip or e.equip == "" or NOT_GEAR[e.equip] then return nil end
+  if not e.equip or e.equip == "" or NOT_GEAR[e.equip] or NO_DISENCHANT[e.id] then return nil end
   local b = bandOf(e.level)
   if not b then return nil end
   if e.quality == 3 then return { { b.blue, 1, 1 } }, b end
