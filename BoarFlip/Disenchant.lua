@@ -140,7 +140,7 @@ local function finish(gear, mats, stats)
     s.listed, s.price, s.value = s.listed + 1, s.price + e.price, s.value + value
     if profit >= MIN_MARGIN then
       s.under, s.profit = s.under + 1, s.profit + profit
-      local d = { id = e.id, key = e.key, name = GetItemInfo(e.id), price = e.price, qty = e.qty, level = e.level,
+      local d = { id = e.id, key = e.key, name = e.name or GetItemInfo(e.id), price = e.price, qty = e.qty, level = e.level,
         quality = e.quality, class = e.class, equip = e.equip, value = value, profit = profit, skill = b.skill,
         missing = missing or nil, own = e.own }
       found[#found + 1] = d

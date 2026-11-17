@@ -76,7 +76,7 @@ end
 
 local function finishScan(deals, seen, unpriced)
   table.sort(deals, function(a, b) return a.vendor - a.price > b.vendor - b.price end)
-  for _, d in ipairs(deals) do d.name = GetItemInfo(d.id) end
+  for _, d in ipairs(deals) do d.name = GetItemInfo(d.id) or d.name end
   db.scans = db.scans or {}
   -- Only the latest scan keeps all its deals.
   local older = db.scans[1]
@@ -785,7 +785,7 @@ ns.onScan({
     local keyText = ("%d:%d:%d:%d"):format(e.id, k.itemLevel or 0, k.itemSuffix or 0, k.battlePetSpeciesID or 0)
     if added[keyText] then return end
     added[keyText] = true
-    found[#found + 1] = { id = e.id, price = e.price, vendor = e.vendor, qty = e.qty, own = e.own, key = k }
+    found[#found + 1] = { id = e.id, name = e.name, price = e.price, vendor = e.vendor, qty = e.qty, own = e.own, key = k }
   end,
   done = function(stats)
     local deals = found

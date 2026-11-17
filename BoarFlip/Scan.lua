@@ -29,7 +29,8 @@ function ns.scanCount() return scan.count or 0 end
 --   item(e): an item listed, once the game has loaded it. e: id; key (the item key:
 --     versions like "of the Bear" have their own); price (the cheapest listing); qty
 --     (listed in all); own (some of them are yours); vendor (what a vendor pays);
---     quality, level, class, subclass, equip (from GetItemInfo; level is the key's).
+--     name, quality, level, class, subclass, equip (from GetItemInfo; level is the key's).
+--     The name is taken now: with 20,000 items, the game forgets some by the end.
 --   done(stats): the scan is through. stats: items (lines in all), unpriced (the ones
 --     the game didn't load in time, left out).
 --   stopped(): it stopped before the end.
@@ -95,11 +96,11 @@ local function priceResults(results)
     local k = r.itemKey
     local id = k and k.itemID
     if not id or (r.totalQuantity or 0) == 0 or (r.minPrice or 0) <= 0 then return true end
-    local _, _, quality, level, _, _, _, _, equip, _, vendor, class, subclass = GetItemInfo(id)
+    local name, _, quality, level, _, _, _, _, equip, _, vendor, class, subclass = GetItemInfo(id)
     if vendor == nil then return false end
     tellItem({ id = id, price = r.minPrice, qty = r.totalQuantity, own = r.containsOwnerItem or nil,
       key = { itemID = id, itemLevel = k.itemLevel, itemSuffix = k.itemSuffix, battlePetSpeciesID = k.battlePetSpeciesID },
-      vendor = vendor, quality = quality, level = (k.itemLevel or 0) > 0 and k.itemLevel or level,
+      vendor = vendor, name = name, quality = quality, level = (k.itemLevel or 0) > 0 and k.itemLevel or level,
       class = class, subclass = subclass, equip = equip })
     return true
   end
