@@ -1,7 +1,8 @@
 -- Boar Flip: buy cloth on the auction house, craft First Aid bandages, sell them to a vendor.
 -- Pick what to flip at the top of the window (it starts on Silk Cloth into Heavy Silk
--- Bandage). One window, always shown (drag it anywhere; /flip window hides it), with the
--- totals and a button for each step that lights up in the right place:
+-- Bandage). Off after each login and /reload: /flip turns it on and shows the window
+-- (drag it anywhere), /flip off or the X turns it off. The window has the totals and a
+-- button for each step that lights up in the right place:
 --   Buy (auction house): all the cloth at or under your max price, in one click. A price
 --     with only 1 cloth on it is taken for bait (yours or someone else's) and left out.
 --   List (auction house): lists 1 cloth cheap, so sellers who undercut follow it down.
@@ -11,7 +12,7 @@
 --     (hold Shift to skip).
 -- The game lets an addon buy, list or craft only as the very first thing a click does,
 -- so those clicks call the game before anything else.
--- /flip shows the totals and settings.
+-- /flip, once on, shows the totals and settings.
 
 local ADDON = ...
 local FIRST_AID = 129       -- profession skill line
@@ -47,6 +48,9 @@ local BAGS = NUM_BAG_SLOTS or 4
 local MAX_ATTACHMENTS = ATTACHMENTS_MAX_RECEIVE or 16
 
 local db, cur   -- the saved settings, and the flip picked in the window
+-- Off after every login and /reload: /flip turns it on, /flip off or the X turns it off.
+-- While off it doesn't search, buy, beep or sell; it still keeps the totals right.
+local on = false
 local frame = CreateFrame("Frame")
 
 -- /flip debug: each step goes to chat (grey) and to BoarFlipDB.log, the last 1500 lines,
@@ -374,7 +378,8 @@ local function alert(preview)
 end
 
 local function onResults()
-  if db.paused then
+  -- Off, or paused: other addons' searches for this cloth land here too, so ignore them.
+  if not on or db.paused then
     ah.waiting = false
     return
   end
@@ -420,7 +425,7 @@ end
 local function refresh()
   -- Kept for the log: whether the game would send a message right now.
   ah.ready = C_AuctionHouse.IsThrottledMessageSystemReady()
-  if db.paused or (ah.state ~= "idle" and ah.state ~= "offer") then return end
+  if not on or db.paused or (ah.state ~= "idle" and ah.state ~= "offer") then return end
   if not ah.seen and not ah.note and GetTime() - ah.openedAt > 10 then
     ah.note = "No answer from the auction house yet."
     showState()
@@ -488,6 +493,7 @@ end
 -- Key binding (Options > Keybindings > Boar Flip, see Bindings.xml): same as Buy.
 BINDING_NAME_BOARBANDAGES_BUY = "Buy"
 function BoarFlip_Buy()
+  if not on then return end
   onBuy()
 end
 
@@ -826,7 +832,8 @@ local function sellBandages(byClick)
   selling = C_Timer.NewTicker(0.2, safe(function()
     local bag, slot, count
     -- Checked right before each sale: with no vendor open this would use the bandage instead.
-    if MerchantFrame:IsShown() then bag, slot, count = findUnlocked(f.make) end
+    -- Turning off stops it too, still counting what was sold.
+    if on and MerchantFrame:IsShown() then bag, slot, count = findUnlocked(f.make) end
     if bag then
       C_Container.UseContainerItem(bag, slot)
       sold = sold + count
@@ -949,6 +956,28 @@ local function pick(f)
   updateWindow()
 end
 
+-- On shows the window and starts searching if the auction house is open (a vendor
+-- already open doesn't sell by itself: use Sell). Off is like walking away from the
+-- auction house and the mailbox: a purchase not yet confirmed is cancelled, one already
+-- confirmed finishes, and taking mail stops.
+local function setOn(value)
+  on = value
+  if on then
+    ah.note, ah.lastAt, ah.seen, ah.openedAt = nil, 0, false, GetTime()
+    win:Show()
+    updateWindow()
+    say("On. /flip off or the X turns it off.")
+    if db.paused then say("Searching is still paused: Resume or /flip pause starts it.") end
+  else
+    if ah.state == "quoting" or ah.state == "confirm" then cancelPurchase("turned off") end
+    if ah.state ~= "buying" then ah.state, ah.note, ah.token = "idle", nil, nil end
+    ah.waiting = false
+    if mail.running then stopMail(nil) end
+    win:Hide()
+    say("Off. /flip turns it on again.")
+  end
+end
+
 local function makeWindow()
   win = CreateFrame("Frame", "BoarFlipFrame", UIParent, "BackdropTemplate")
   win:SetSize(WIDTH, -TOP_BUTTONS + 5 * BUTTON_GAP + 8)
@@ -979,15 +1008,11 @@ local function makeWindow()
   title:SetPoint("TOPLEFT", PAD, -11)
   title:SetText("Boar Flip")
 
-  -- The game's red X. /flip window brings the window back.
+  -- The game's red X turns Boar Flip off. /flip turns it on again.
   local closeButton = CreateFrame("Button", "BoarFlipCloseButton", win, "UIPanelCloseButton")
   closeButton:SetSize(24, 24)
   closeButton:SetPoint("TOPRIGHT", -4, -4)
-  closeButton:SetScript("OnClick", safe(function()
-    db.hidden = true
-    win:Hide()
-    say("Window closed: /flip window brings it back.")
-  end))
+  closeButton:SetScript("OnClick", safe(function() setOn(false) end))
 
   pauseButton = CreateFrame("Button", nil, win, "UIPanelButtonTemplate")
   pauseButton:SetSize(64, 18)
@@ -1071,7 +1096,9 @@ local function makeWindow()
   craftButton = button("Craft", 3, onCraft)
   sellButton = button("Sell", 4, safe(function() sellBandages(true) end))
 
-  if db.hidden then win:Hide() end
+  -- Starts off, so hidden. (db.hidden is from before there was on and off.)
+  db.hidden = nil
+  win:Hide()
   C_Timer.NewTicker(0.5, safe(updateWindow))
   updateWindow()
 end
@@ -1083,7 +1110,15 @@ SlashCmdList.BOARFLIP = safe(function(msg)
   local cmd, arg = (msg or ""):match("^%s*(%S*)%s*(.-)%s*$")
   cmd = cmd:lower()
   local s = stats(cur)
-  if cmd == "max" then
+  if (cmd == "" or cmd == "on") and not on then
+    setOn(true)
+  elseif cmd == "on" then
+    say("Already on. /flip off turns it off.")
+  elseif cmd == "off" then
+    if on then setOn(false) else say("Already off. /flip turns it on.") end
+  elseif cmd == "window" then
+    setOn(not on)
+  elseif cmd == "max" then
     local value = parseMoney(arg)
     if not value or value <= 0 then return say("Example: /flip max 1s90") end
     s.max = value
@@ -1103,10 +1138,6 @@ SlashCmdList.BOARFLIP = safe(function(msg)
     if not n or n < 0 then return say("Example: /flip free 1") end
     db.free = math.floor(n)
     say(("Open mail keeps %d bag slot(s) free."):format(db.free))
-  elseif cmd == "window" then
-    db.hidden = win:IsShown() or nil
-    win:SetShown(not db.hidden)
-    if not db.hidden then updateWindow() end
   elseif cmd == "debug" then
     db.debug = not db.debug or nil
     if db.debug then
@@ -1145,7 +1176,8 @@ SlashCmdList.BOARFLIP = safe(function(msg)
     if s.listed > 0 then
       say(("Listed %d, %d sold for %s, deposits %s."):format(s.listed, s.listSold, money(s.listEarned), money(s.listSpent)))
     end
-    say("Settings: /flip max 1s90, list 1s50, free 1, window, pause, sound, debug, reset")
+    if not on then say("Boar Flip is off: /flip turns it on.") end
+    say("Settings: /flip max 1s90, list 1s50, free 1, pause, sound, debug, reset, off")
   end
 end)
 
@@ -1255,7 +1287,7 @@ frame:SetScript("OnEvent", safe(function(_, event, ...)
 
   elseif event == "MERCHANT_SHOW" then
     merchantOpen = true
-    sellBandages(false)
+    if on then sellBandages(false) end
     updateWindow()
 
   elseif event == "MERCHANT_CLOSED" then
