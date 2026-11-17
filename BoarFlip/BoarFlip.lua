@@ -388,9 +388,9 @@ local function readResults(f, max)
 end
 
 -- The fishing bite sound when cloth at or under the max shows up, at most every 5 seconds.
--- It plays on the Sound Effects channel, like the real bite.
+-- It plays on the Sound Effects channel, like the real bite. Off unless /flip sound turns it on.
 local function alert(preview)
-  if db.quiet and not preview then return end
+  if not db.sound and not preview then return end
   if not preview and GetTime() - (ah.alertAt or -99) < 5 then return end
   ah.alertAt = GetTime()
   PlaySoundFile(BITE_SOUND, "SFX")
@@ -1943,12 +1943,13 @@ SlashCmdList.BOARFLIP = safe(function(msg)
       say("Debug off. The log stays saved until debug is turned on again.")
     end
   elseif cmd == "sound" then
-    db.quiet = not db.quiet or nil
-    if db.quiet then
-      say("Sound alert off.")
-    else
+    db.sound = not db.sound or nil
+    db.quiet = nil   -- the old opt-out setting, from before the alert was off by default
+    if db.sound then
       say("Sound alert on. This is how it sounds.")
       alert(true)
+    else
+      say("Sound alert off.")
     end
   elseif cmd == "pause" then
     setPaused(not db.paused)
