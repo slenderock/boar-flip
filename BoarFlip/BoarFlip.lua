@@ -13,8 +13,8 @@
 -- The game lets an addon buy, list or craft only as the very first thing a click does,
 -- so those clicks call the game before anything else.
 -- /flip, once on, shows the totals and settings.
--- /flip scan, at the auction house, lists what sells to a vendor for more than its
--- cheapest listing (see Vendor deals).
+-- /flip scan, at the auction house, lists what sells to a vendor for more than it costs,
+-- adds up what buying it all would earn, and buys it a click at a time (see Vendor deals).
 
 local ADDON = ...
 local FIRST_AID = 129       -- profession skill line
@@ -263,7 +263,11 @@ local buyButton, listButton, pauseButton, note, age, ticker
 -- /flip scan (see Vendor deals below). phase: start (search not sent yet), paging,
 -- pricing, or nil when no scan is going.
 local scan = {}
-local updateDeals               -- the deals window, made further down
+-- After a scan: the lookup of each deal's listings (running, want = the deal waiting for
+-- its answer), and Buy next (state: quoting, confirm, buying, bidding or nil; p = the
+-- purchase going; next = the one the button buys).
+local look, buyer = {}, {}
+local updateDeals, dealBuyButton   -- the deals window, made further down
 
 local function scanning()
   return scan.phase == "start" or scan.phase == "paging"
@@ -317,7 +321,8 @@ local function showState()
   else
     buyButton:SetText("Searching...")
   end
-  buyButton:SetEnabled(ah.open and (s == "offer" or s == "confirm"))
+  -- Off while a vendor deal is being bought: the game's answers don't say which purchase they're for.
+  buyButton:SetEnabled(ah.open and (s == "offer" or s == "confirm") and not buyer.state)
 
   local price = listing.price
   if not ah.open then
@@ -436,15 +441,21 @@ end
 
 -- Vendor deals ----------------------------------------------------------------
 -- /flip scan at the auction house goes through everything listed, a page at a time (the
--- same search Auctionator's scan uses), then lists what a vendor pays more for than its
--- cheapest listing. It only shows them: buying is up to you. The search gives one line
--- per item, with the cheapest price and how many are listed in all, not how many of
--- them are under the vendor price. The cloth searching waits while it pages. The last
--- few scans are kept in BoarFlipDB.scans.
+-- same search Auctionator's scan uses), and keeps what a vendor pays more for than its
+-- cheapest listing. That search gives one line per item: the cheapest price and how many
+-- are listed in all. So each deal's listings are then looked up, one item at a time in
+-- the gaps between the cloth searches, for the exact ones under the vendor price: they
+-- add up to what Buy all would earn, and they are what Buy next buys. The cloth
+-- searching waits while the scan pages. Scans are kept in BoarFlipDB.scans (the latest
+-- with all its deals), purchases in BoarFlipDB.buys.
 local SCAN_TIMEOUT = 20     -- seconds without a page before giving up
 local SCAN_BATCH = 400      -- items priced per frame, so the game doesn't freeze
 local SCAN_WAIT = 10        -- seconds to wait for items the game hasn't loaded yet
-local SCAN_KEEP, SCAN_SAVED = 5, 50   -- scans kept, deals saved for each
+local SCAN_KEEP, SCAN_SAVED = 5, 50   -- scans kept, deals kept for the older ones
+local LOOK_TIMEOUT = 3      -- seconds to wait for one deal's listings
+local BUY_TIMEOUT = 8       -- seconds to wait for a purchase to go through
+local BUYS_KEPT = 50        -- purchases kept in BoarFlipDB.buys
+local PRICE_SORT = { { sortOrder = Enum.AuctionHouseSortOrder and Enum.AuctionHouseSortOrder.Price or 0, reverseSort = false } }
 
 local function resumeSearch()
   ah.note, ah.lastAt, ah.seen, ah.openedAt = nil, 0, false, GetTime()
@@ -477,18 +488,57 @@ local function scanPage()
   end
 end
 
+local function lastScan()
+  return db.scans and db.scans[1]
+end
+
+-- Item keys tell apart versions of one item, like the "of the Bear" ones.
+local function sameKey(a, b)
+  return a ~= nil and b ~= nil and a.itemID == b.itemID and (a.itemLevel or 0) == (b.itemLevel or 0)
+    and (a.itemSuffix or 0) == (b.itemSuffix or 0) and (a.battlePetSpeciesID or 0) == (b.battlePetSpeciesID or 0)
+end
+
+local function searchKey(d)
+  local k = d.key
+  return C_AuctionHouse.MakeItemKey(k.itemID, k.itemLevel or 0, k.itemSuffix or 0, k.battlePetSpeciesID or 0)
+end
+
+-- What's left to buy in a scan: purchases, their cost, what a vendor pays for them, how
+-- many deals have been looked up, and the scan's guess (one of each).
+local function dealTotals(s)
+  local t = { n = 0, cost = 0, worth = 0, looked = 0, one = 0 }
+  for _, d in ipairs(s.deals) do
+    if d.buys then
+      t.looked = t.looked + 1
+      for _, b in ipairs(d.buys) do
+        t.n, t.cost, t.worth = t.n + 1, t.cost + b.cost, t.worth + d.vendor * b.qty
+      end
+    end
+    t.one = t.one + d.vendor - d.price
+  end
+  return t
+end
+
+local function startLook()
+  local s = lastScan()
+  look.running = s ~= nil and s.deals[1] ~= nil and s.deals[1].key ~= nil
+  look.want, look.done, look.keyWait = nil, 0, nil
+end
+
 local function finishScan(deals, seen, unpriced)
   table.sort(deals, function(a, b) return a.vendor - a.price > b.vendor - b.price end)
-  local saved = {}
-  for k = 1, math.min(#deals, SCAN_SAVED) do
-    local d = deals[k]
-    d.name = GetItemInfo(d.id)
-    saved[k] = d
-  end
+  for _, d in ipairs(deals) do d.name = GetItemInfo(d.id) end
   db.scans = db.scans or {}
-  table.insert(db.scans, 1, { at = time(), items = seen, unpriced = unpriced, found = #deals, deals = saved })
+  -- Only the latest scan keeps all its deals.
+  local older = db.scans[1]
+  if older and older.deals and #older.deals > SCAN_SAVED then
+    for k = #older.deals, SCAN_SAVED + 1, -1 do older.deals[k] = nil end
+  end
+  table.insert(db.scans, 1, { at = time(), items = seen, unpriced = unpriced, found = #deals, deals = deals })
   while #db.scans > SCAN_KEEP do table.remove(db.scans) end
   scan.phase, scan.token = nil, nil
+  buyer.next, buyer.halted = nil, nil
+  startLook()
   log("scan: done.", seen, "items,", #deals, "deals,", unpriced, "unpriced")
   local left = unpriced > 0 and (" (%d the game didn't load in time are left out)"):format(unpriced) or ""
   if #deals == 0 then
@@ -498,6 +548,7 @@ local function finishScan(deals, seen, unpriced)
     local link = select(2, GetItemInfo(best.id)) or best.name or ("item " .. best.id)
     say(("Scanned %d items: %d sell to a vendor for more than their cheapest listing%s. Best: %s, +%s each."):format(
       seen, #deals, left, link, money(best.vendor - best.price)))
+    say("Looking up their listings now, for what Buy all would earn. Stay at the auction house.")
   end
   if updateDeals then updateDeals() end
 end
@@ -509,6 +560,7 @@ local function priceResults(results)
   resumeSearch()
   local token = scan.token
   local deals, later, i, waitFrom = {}, {}, 1, nil
+  local added = {}   -- item keys already in deals: the pages can bring one twice
 
   local function check(r)   -- false while the game hasn't loaded the item
     local id = r.itemKey and r.itemKey.itemID
@@ -516,8 +568,13 @@ local function priceResults(results)
     local vendor = select(11, GetItemInfo(id))
     if vendor == nil then return false end
     if vendor > r.minPrice then
+      local k = r.itemKey
+      local keyText = ("%d:%d:%d:%d"):format(id, k.itemLevel or 0, k.itemSuffix or 0, k.battlePetSpeciesID or 0)
+      if added[keyText] then return true end
+      added[keyText] = true
       deals[#deals + 1] = { id = id, price = r.minPrice, vendor = vendor, qty = r.totalQuantity,
-        own = r.containsOwnerItem or nil }
+        own = r.containsOwnerItem or nil,
+        key = { itemID = id, itemLevel = k.itemLevel, itemSuffix = k.itemSuffix, battlePetSpeciesID = k.battlePetSpeciesID } }
     end
     return true
   end
@@ -573,29 +630,293 @@ local function onBrowse(event, added)
   if updateDeals then updateDeals() end
 end
 
--- Runs ten times a second while the auction house is open: searches again REFRESH
--- seconds after the last answer, unless a search is on its way or a purchase is going.
-local function refresh()
-  -- Kept for the log: whether the game would send a message right now.
-  ah.ready = C_AuctionHouse.IsThrottledMessageSystemReady()
-  if scanning() then return scanPage() end
-  if not on or db.paused or (ah.state ~= "idle" and ah.state ~= "offer") then return end
+-- Searches wait while the cursor is on a Buy button, so the auction house is free the
+-- moment you click.
+local function holdForClick()
+  local function over(b) return b ~= nil and b:IsVisible() and b:IsMouseOver() end
+  return over(buyButton) or over(dealBuyButton)
+end
+
+-- A deal's listings are in: d.buys is what's under the vendor price (empty for none),
+-- d.kind whether it's bought by the auction (item) or by the quantity (commodity).
+local function lookDone(d)
+  look.want = nil
+  look.done = (look.done or 0) + 1
+  if look.done % 50 == 0 then log("look: done", look.done) end
+  if updateDeals then updateDeals() end
+end
+
+-- From the auction house ticker, when the cloth search didn't just go: asks for the next
+-- deal's listings. Gives a deal LOOK_TIMEOUT seconds to answer, then counts it as none.
+local function lookStep()
+  if not look.running then return end
+  if look.want then
+    if GetTime() - look.sentAt > LOOK_TIMEOUT then
+      look.want.buys, look.want.noAnswer = {}, true
+      lookDone(look.want)
+    end
+    return
+  end
+  if buyer.state or not ah.ready or holdForClick() then return end
+  local s = lastScan()
+  if not s then
+    look.running = false
+    return
+  end
+  local d
+  for _, deal in ipairs(s.deals) do
+    if not deal.buys then d = deal break end
+  end
+  if not d then
+    look.running = false
+    local t = dealTotals(s)
+    log("look: all done", #s.deals, "deals,", t.n, "purchases")
+    say(("Buy all: %d purchases for %s, a vendor pays %s for them: +%s."):format(
+      t.n, money(t.cost), money(t.worth), money(t.worth - t.cost)))
+    if updateDeals then updateDeals() end
+    return
+  end
+  local key = searchKey(d)
+  -- Like the cloth search: sent before the game has the item, the search is ignored.
+  if not C_AuctionHouse.GetItemKeyInfo(key) then
+    if not look.keyWait or look.keyWait.d ~= d then look.keyWait = { d = d, at = GetTime() } end
+    if GetTime() - look.keyWait.at > LOOK_TIMEOUT then
+      d.buys, d.noAnswer = {}, true
+      lookDone(d)
+    end
+    return
+  end
+  look.want, look.sentAt = d, GetTime()
+  C_AuctionHouse.SendSearchQuery(key, PRICE_SORT, false)
+end
+
+-- Items (gear): each auction is a purchase. Only single ones, not yours or your
+-- account's, with a buyout under what a vendor pays. (Whether the game's buyout of an
+-- auction of several is for one or for all of them isn't known, so those are left out.)
+local function onLookItems(itemKey)
+  local d = look.want
+  -- The same item and version ("of the Bear"); the key's level may come back filled in
+  -- differently, which is logged.
+  if not (d and itemKey and itemKey.itemID == d.id and (itemKey.itemSuffix or 0) == (d.key.itemSuffix or 0)) then return end
+  if not sameKey(itemKey, d.key) then
+    look.keyLogs = (look.keyLogs or 0) + 1
+    if look.keyLogs <= 5 then
+      log("look: key differs", d.id, itemKey.itemLevel, itemKey.itemSuffix, "vs", d.key.itemLevel, d.key.itemSuffix)
+    end
+  end
+  local n = C_AuctionHouse.GetNumItemSearchResults(itemKey)
+  -- What a vendor pays for this very version, when the game knows it: the scan used the
+  -- plain item's price.
+  for i = 1, n do
+    local r = C_AuctionHouse.GetItemSearchResultInfo(itemKey, i)
+    local v = r and r.itemLink and select(11, GetItemInfo(r.itemLink))
+    if v then
+      if v ~= d.vendor then
+        look.priceLogs = (look.priceLogs or 0) + 1
+        if look.priceLogs <= 5 then log("look: vendor price differs", d.id, v, "vs", d.vendor) end
+        d.vendor = v
+      end
+      break
+    end
+  end
+  local buys = {}
+  for i = 1, n do
+    local r = C_AuctionHouse.GetItemSearchResultInfo(itemKey, i)
+    if r and r.buyoutAmount and r.buyoutAmount > 0 and (r.quantity or 1) == 1
+      and not (r.containsOwnerItem or r.containsAccountItem) and r.buyoutAmount < d.vendor then
+      buys[#buys + 1] = { auction = r.auctionID, qty = 1, cost = r.buyoutAmount }
+      if r.itemLink then d.link = r.itemLink end
+    end
+  end
+  d.kind, d.buys = "item", buys
+  lookDone(d)
+end
+
+-- Commodities (stacking goods): one purchase of everything under the vendor price that
+-- isn't yours, cheapest first.
+local function onLookCommodity(itemID)
+  local d = look.want
+  if not (d and d.id == itemID) then return end
+  local qty, cost = 0, 0
+  for i = 1, C_AuctionHouse.GetNumCommoditySearchResults(itemID) do
+    local r = C_AuctionHouse.GetCommoditySearchResultInfo(itemID, i)
+    if not r or r.unitPrice >= d.vendor then break end
+    local q = r.quantity - (r.numOwnerItems or 0)
+    if q > 0 then qty, cost = qty + q, cost + q * r.unitPrice end
+  end
+  d.kind = "commodity"
+  d.buys = qty > 0 and { { qty = qty, cost = cost } } or {}
+  lookDone(d)
+end
+
+-- Buy next ---------------------------------------------------------------------
+-- Each click buys one purchase: the game allows one per click. The purchase goes through
+-- allowed() first, and the gold is watched: it must go down by the cost and no more.
+
+local function nextPurchase()
+  local s = lastScan()
+  for i, d in ipairs(s and s.deals or {}) do
+    if d.buys and d.buys[1] then return { d = d, b = d.buys[1], i = i } end
+  end
+end
+
+-- The one check every purchase passes: under what a vendor pays, and gold for it.
+local function allowed(p)
+  return p ~= nil and p.b.cost > 0 and p.b.cost < p.d.vendor * p.b.qty and p.b.cost <= GetMoney()
+end
+
+-- Whether the Buy next button may buy now.
+local function canBuyDeal()
+  return on and ah.open and not scanning() and not buyer.state and not buyer.halted
+    and (ah.state == "idle" or ah.state == "offer")
+end
+
+local function dealName(d)
+  return d.link or select(2, GetItemInfo(d.id)) or d.name or ("item " .. d.id)
+end
+
+-- The purchase is over, bought or not. paid is what it cost when bought.
+local function endPurchase(bought, text, paid)
+  local p = buyer.p
+  local before = buyer.gold
+  buyer.state, buyer.p, buyer.at, buyer.gold, buyer.quote = nil, nil, nil, nil, nil
+  if not p then return end
+  for i, b in ipairs(p.d.buys) do
+    if b == p.b then table.remove(p.d.buys, i) break end
+  end
+  local worth = p.d.vendor * p.b.qty
+  db.buys = db.buys or {}
+  table.insert(db.buys, 1, { at = time(), id = p.d.id, name = GetItemInfo(p.d.id), qty = p.b.qty, cost = p.b.cost,
+    paid = paid, worth = worth, goldBefore = before, goldAfter = GetMoney(), result = bought and "bought" or (text or "not bought") })
+  while #db.buys > BUYS_KEPT do table.remove(db.buys) end
+  log("deal:", bought and "bought" or "not bought", p.d.id, "qty", p.b.qty, "cost", p.b.cost, "paid", paid,
+    "gold", before, "->", GetMoney(), text)
+  if bought then
+    local t = db.dealTotals or { bought = 0, spent = 0, worth = 0 }
+    db.dealTotals = t
+    t.bought, t.spent, t.worth = t.bought + p.b.qty, t.spent + paid, t.worth + worth
+    p.d.bought = (p.d.bought or 0) + p.b.qty
+    buyer.n, buyer.spent, buyer.worth = (buyer.n or 0) + p.b.qty, (buyer.spent or 0) + paid, (buyer.worth or 0) + worth
+    say(("Bought %s%s for %s, a vendor pays %s: +%s."):format(dealName(p.d),
+      p.b.qty > 1 and (" x" .. p.b.qty) or "", money(paid), money(worth), money(worth - paid)))
+  elseif text then
+    say(text)
+  end
+  if updateDeals then updateDeals() end
+end
+
+-- Gold went down by more than the purchase: stop buying until the next scan.
+local function tripwire(drop, cost)
+  if drop <= cost or buyer.halted then return false end
+  buyer.halted = "gold went down by more than a purchase"
+  say(("|cffff7373Gold went down by %s, more than the %s this purchase should cost. Buy next is stopped until the next scan.|r"):format(
+    money(drop), money(cost)))
+  return true
+end
+
+-- Item purchases: the gold going down by the cost is what counts as bought.
+local function onDealMoney()
+  if not (buyer.state and buyer.gold) then return end
+  local drop = buyer.gold - GetMoney()
+  if drop <= 0 then return end
+  local cost = buyer.state == "bidding" and buyer.p.b.cost or buyer.quote or buyer.p.b.cost
+  tripwire(drop, cost)
+  if buyer.state == "bidding" and drop >= cost then endPurchase(true, nil, drop) end
+end
+
+-- No answer in time, or the auction house closed: the gold says whether it went through.
+local function purchaseTimedOut(why)
+  local s, p = buyer.state, buyer.p
+  if s == "quoting" or s == "confirm" then
+    cancelPurchase("deal: " .. why)
+    return endPurchase(false, "Skipped: " .. why .. ".")
+  end
+  local drop = buyer.gold - GetMoney()
+  local cost = s == "bidding" and p.b.cost or buyer.quote or p.b.cost
+  if drop > 0 and drop >= cost then
+    tripwire(drop, cost)
+    return endPurchase(true, nil, drop)
+  end
+  endPurchase(false, ("No answer about %s (%s): skipped it. If it shows up in your mailbox, it was bought."):format(dealName(p.d), why))
+end
+
+local function buyerTimeouts()
+  if not buyer.state or buyer.state == "confirm" then return end
+  if GetTime() - buyer.at > BUY_TIMEOUT then purchaseTimedOut("no answer") end
+end
+
+-- The auction house's answers while a deal purchase is going. They carry no item, so the
+-- cloth's Buy is kept off meanwhile.
+local function onDealEvent(event, ...)
+  local p = buyer.p
+  if not p then return end
+  if event == "COMMODITY_PRICE_UPDATED" and buyer.state == "quoting" then
+    local _, total = ...
+    if total and total < p.d.vendor * p.b.qty and total <= GetMoney() then
+      buyer.quote = total
+      if db.clickToConfirm then
+        buyer.state = "confirm"
+      else
+        buyer.state, buyer.at = "buying", GetTime()
+        C_AuctionHouse.ConfirmCommoditiesPurchase(p.d.id, p.b.qty)
+        log("deal: ConfirmCommoditiesPurchase", p.d.id, p.b.qty, "quote", total)
+      end
+      if updateDeals then updateDeals() end
+    else
+      cancelPurchase("deal: quote " .. tostring(total))
+      endPurchase(false, ("Skipped %s: the price went up to %s."):format(dealName(p.d), money(total or 0)))
+    end
+  elseif event == "COMMODITY_PRICE_UNAVAILABLE" and buyer.state == "quoting" then
+    endPurchase(false, ("Skipped %s: it sold out."):format(dealName(p.d)))
+  elseif event == "COMMODITY_PURCHASE_SUCCEEDED" and buyer.state == "buying" then
+    local drop = buyer.gold - GetMoney()
+    if drop > 0 then tripwire(drop, buyer.quote) end
+    endPurchase(true, nil, buyer.quote)
+  elseif event == "COMMODITY_PURCHASE_FAILED" and buyer.state == "buying" then
+    endPurchase(false, ("Someone else got %s first."):format(dealName(p.d)))
+  elseif event == "AUCTION_HOUSE_PURCHASE_COMPLETED" and buyer.state == "bidding" then
+    if ... == p.b.auction then
+      local drop = buyer.gold - GetMoney()
+      if drop > 0 then tripwire(drop, p.b.cost) end
+      endPurchase(true, nil, p.b.cost)
+    end
+  elseif event == "AUCTION_HOUSE_SHOW_ERROR" and buyer.state == "bidding" then
+    endPurchase(false, ("Couldn't buy %s: someone else probably got it first."):format(dealName(p.d)))
+  end
+end
+
+-- Runs ten times a second while the auction house is open: the cloth search goes again
+-- REFRESH seconds after the last answer, unless a search is on its way or a purchase is
+-- going. True when it sent one.
+local function clothSearch()
+  if not on or db.paused or (ah.state ~= "idle" and ah.state ~= "offer") or buyer.state then return false end
   if not ah.seen and not ah.note and GetTime() - ah.openedAt > 10 then
     ah.note = "No answer from the auction house yet."
     showState()
   end
-  if GetTime() - (ah.lastAt or 0) < REFRESH then return end
-  if ah.waiting and GetTime() - ah.sentAt < 5 then return end
-  -- Hold off while the cursor is on the Buy button, so the auction house is free
-  -- the moment you click.
-  if buyButton and buyButton:IsMouseOver() then return end
-  if not maxPrice(cur) then return loadItems(cur) end
+  if GetTime() - (ah.lastAt or 0) < REFRESH then return false end
+  if ah.waiting and GetTime() - ah.sentAt < 5 then return false end
+  if holdForClick() then return false end
+  if not maxPrice(cur) then
+    loadItems(cur)
+    return false
+  end
   local key = C_AuctionHouse.MakeItemKey(cur.buy)
   -- GetItemKeyInfo is nil until the game has the item cached; searches sent before that get ignored.
-  if not (ah.ready and C_AuctionHouse.GetItemKeyInfo(key)) then return end
-  local order = Enum.AuctionHouseSortOrder and Enum.AuctionHouseSortOrder.Price or 0
+  if not (ah.ready and C_AuctionHouse.GetItemKeyInfo(key)) then return false end
   ah.waiting, ah.sentAt = true, GetTime()
-  C_AuctionHouse.SendSearchQuery(key, { { sortOrder = order, reverseSort = false } }, false)
+  C_AuctionHouse.SendSearchQuery(key, PRICE_SORT, false)
+  return true
+end
+
+-- The cloth comes first; the deals' lookups use the gaps between its searches.
+local function refresh()
+  -- Kept for the log: whether the game would send a message right now.
+  ah.ready = C_AuctionHouse.IsThrottledMessageSystemReady()
+  if scanning() then return scanPage() end
+  buyerTimeouts()
+  if clothSearch() then return end
+  if on then lookStep() end
 end
 
 -- Pause stops the searching (and drops the offer, which would go stale). It is
@@ -647,7 +968,7 @@ end
 -- Key binding (Options > Keybindings > Boar Flip, see Bindings.xml): same as Buy.
 BINDING_NAME_BOARBANDAGES_BUY = "Buy"
 function BoarFlip_Buy()
-  if not on then return end
+  if not on or buyer.state then return end
   onBuy()
 end
 
@@ -1011,6 +1332,7 @@ local mailButton, craftButton, sellButton
 -- The picker is locked while something is going on for the flip it shows.
 local function busy()
   return (ah.state ~= "idle" and ah.state ~= "offer") or mail.taking or selling ~= nil or craft.watch ~= nil
+    or buyer.state ~= nil
 end
 
 -- The totals, one per row: label on the left, value on the right, never wrapping.
@@ -1125,6 +1447,8 @@ local function setOn(value)
     if db.paused then say("Searching is still paused: Resume or /flip pause starts it.") end
   else
     if scan.phase then stopScan(nil) end
+    look.running, look.want = false, nil
+    if buyer.state == "quoting" or buyer.state == "confirm" then purchaseTimedOut("turned off") end
     if ah.state == "quoting" or ah.state == "confirm" then cancelPurchase("turned off") end
     if ah.state ~= "buying" then ah.state, ah.note, ah.token = "idle", nil, nil end
     ah.waiting = false
@@ -1148,7 +1472,7 @@ local function makeWindow()
     edgeSize = 12,
     insets = { left = 3, right = 3, top = 3, bottom = 3 },
   })
-  win:SetBackdropColor(0, 0, 0, 0.85)
+  win:SetBackdropColor(0, 0, 0, 1)
   win:SetClampedToScreen(true)
   win:SetMovable(true)
   win:EnableMouse(true)
@@ -1260,14 +1584,84 @@ local function makeWindow()
 end
 
 -- The deals window: to the left of the main one, and hidden with it. Shows the last
--- scan, best deal first; hover a line for the numbers.
-local dealsFrame, dealStatus
+-- scan from the deal being bought on; hover a line for the numbers. Buy next buys one
+-- purchase a click, best deal first; Skip leaves out the rest of that item.
+local dealsFrame, dealStatus, dealEarn, dealNext, dealBought, skipButton
 local dealRows = {}
-local DEAL_WIDTH, DEAL_ROWS = 340, 15
+local DEAL_WIDTH, DEAL_ROWS = 360, 15
+local DEAL_TOP_ROWS = -62
+local DEAL_BOTTOM = DEAL_TOP_ROWS - ROW * DEAL_ROWS - 6
+
+-- A deal's line, right side: the scan's guess until its listings are looked up.
+local function dealRowText(d)
+  if not d.buys then
+    return ("+%s each, %d listed"):format(money(d.vendor - d.price), d.qty)
+  end
+  if d.buys[1] then
+    local cost, worth = 0, 0
+    for _, b in ipairs(d.buys) do cost, worth = cost + b.cost, worth + d.vendor * b.qty end
+    local n = d.kind == "commodity" and d.buys[1].qty or #d.buys
+    return ("+%s, %d to buy"):format(money(worth - cost), n)
+  end
+  if d.bought then return ("|cff73ff73bought %d|r"):format(d.bought) end
+  if d.skipped then return "|cff999999skipped|r" end
+  if d.noAnswer then return "|cff999999no answer|r" end
+  return "|cff999999none under vendor now|r"
+end
+
+local function plainName(d)
+  return (dealName(d):gsub("[%[%]]", ""))
+end
+
+-- Buy next. Like Buy, the purchase is the first thing the click does, so no safe().
+local function onDealBuy()
+  if buyer.state == "confirm" then
+    local p = buyer.p
+    C_AuctionHouse.ConfirmCommoditiesPurchase(p.d.id, p.b.qty)
+    buyer.state, buyer.at = "buying", GetTime()
+    log("deal click: ConfirmCommoditiesPurchase", p.d.id, p.b.qty, "quote", buyer.quote)
+    return updateDeals()
+  end
+  local p = buyer.next
+  if not (canBuyDeal() and allowed(p)) then return end
+  -- A refusal comes during the call (see onBlocked), so the flags are cleared before it.
+  local blocked
+  if p.d.kind == "commodity" then
+    ah.startBlocked = nil
+    C_AuctionHouse.StartCommoditiesPurchase(p.d.id, p.b.qty)
+    blocked = ah.startBlocked
+    buyer.state = "quoting"
+  else
+    buyer.bidBlocked = nil
+    C_AuctionHouse.PlaceBid(p.b.auction, p.b.cost)
+    blocked = buyer.bidBlocked
+    buyer.state = "bidding"
+  end
+  if blocked then
+    buyer.state = nil
+    buyer.halted = "the game blocked Boar Flip from buying"
+    log("deal click: blocked", p.d.id, p.b.cost)
+    say("The game blocked Boar Flip from buying. Buy next is stopped until the next scan.")
+    return updateDeals()
+  end
+  buyer.p, buyer.at, buyer.gold = p, GetTime(), GetMoney()
+  log("deal click:", buyer.state, p.d.id, "qty", p.b.qty, "cost", p.b.cost, "vendor", p.d.vendor * p.b.qty, "gold", buyer.gold)
+  updateDeals()
+end
+
+local function line(y, color)
+  local fs = dealsFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  fs:SetPoint("TOPLEFT", PAD, y)
+  fs:SetWidth(DEAL_WIDTH - 2 * PAD)
+  fs:SetJustifyH("LEFT")
+  fs:SetWordWrap(false)
+  if color then fs:SetTextColor(color, color, color) end
+  return fs
+end
 
 local function makeDeals()
   dealsFrame = CreateFrame("Frame", "BoarFlipDealsFrame", win, "BackdropTemplate")
-  dealsFrame:SetSize(DEAL_WIDTH, 50 + ROW * DEAL_ROWS + 10)
+  dealsFrame:SetSize(DEAL_WIDTH, -DEAL_BOTTOM + 14 + 14 + 6 + 22 + 10)
   dealsFrame:SetPoint("TOPRIGHT", win, "TOPLEFT", -4, 0)
   dealsFrame:SetBackdrop({
     bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
@@ -1275,7 +1669,7 @@ local function makeDeals()
     edgeSize = 12,
     insets = { left = 3, right = 3, top = 3, bottom = 3 },
   })
-  dealsFrame:SetBackdropColor(0, 0, 0, 0.85)
+  dealsFrame:SetBackdropColor(0, 0, 0, 1)
   dealsFrame:SetClampedToScreen(true)
   dealsFrame:EnableMouse(true)
 
@@ -1283,22 +1677,22 @@ local function makeDeals()
   title:SetPoint("TOPLEFT", PAD, -11)
   title:SetText("Vendor deals")
 
+  -- Closing it cancels a purchase waiting for Confirm; one already sent finishes.
   local closeButton = CreateFrame("Button", nil, dealsFrame, "UIPanelCloseButton")
   closeButton:SetSize(24, 24)
   closeButton:SetPoint("TOPRIGHT", -4, -4)
-  closeButton:SetScript("OnClick", function() dealsFrame:Hide() end)
+  closeButton:SetScript("OnClick", safe(function()
+    if buyer.state == "confirm" then purchaseTimedOut("window closed") end
+    dealsFrame:Hide()
+  end))
 
-  dealStatus = dealsFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-  dealStatus:SetPoint("TOPLEFT", PAD, -32)
-  dealStatus:SetWidth(DEAL_WIDTH - 2 * PAD)
-  dealStatus:SetJustifyH("LEFT")
-  dealStatus:SetWordWrap(false)
-  dealStatus:SetTextColor(0.6, 0.6, 0.6)
+  dealStatus = line(-30, 0.6)
+  dealEarn = line(-44)
 
   for k = 1, DEAL_ROWS do
     local row = CreateFrame("Button", nil, dealsFrame)
     row:SetSize(DEAL_WIDTH - 2 * PAD, ROW)
-    row:SetPoint("TOPLEFT", PAD, -50 - ROW * (k - 1))
+    row:SetPoint("TOPLEFT", PAD, DEAL_TOP_ROWS - ROW * (k - 1))
     row.right = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     row.right:SetPoint("RIGHT")
     row.right:SetJustifyH("RIGHT")
@@ -1312,48 +1706,148 @@ local function makeDeals()
       local d = self.deal
       if not d then return end
       GameTooltip:SetOwner(self, "ANCHOR_LEFT")
-      GameTooltip:SetItemByID(d.id)
+      if d.link then GameTooltip:SetHyperlink(d.link) else GameTooltip:SetItemByID(d.id) end
       GameTooltip:AddLine(" ")
-      GameTooltip:AddDoubleLine("Cheapest listing", money(d.price), 1, 0.82, 0, 1, 1, 1)
       GameTooltip:AddDoubleLine("A vendor pays", money(d.vendor), 1, 0.82, 0, 1, 1, 1)
-      GameTooltip:AddDoubleLine("Listed in all", tostring(d.qty), 1, 0.82, 0, 1, 1, 1)
-      GameTooltip:AddLine("Only the cheapest one is sure to be under the vendor price.", 0.6, 0.6, 0.6, true)
-      if d.own then GameTooltip:AddLine("Some of these listings are yours.", 1, 0.45, 0.45, true) end
+      if d.buys and d.buys[1] then
+        local cost, n = 0, 0
+        for _, b in ipairs(d.buys) do cost, n = cost + b.cost, n + b.qty end
+        GameTooltip:AddDoubleLine(("Under it now: %d"):format(n), money(cost), 1, 0.82, 0, 1, 1, 1)
+        GameTooltip:AddDoubleLine("A vendor pays for them", money(n * d.vendor), 1, 0.82, 0, 1, 1, 1)
+      elseif not d.buys then
+        GameTooltip:AddDoubleLine("Cheapest at the scan", money(d.price), 1, 0.82, 0, 1, 1, 1)
+        GameTooltip:AddDoubleLine("Listed in all", tostring(d.qty), 1, 0.82, 0, 1, 1, 1)
+        GameTooltip:AddLine("Its listings haven't been looked up yet.", 0.6, 0.6, 0.6, true)
+      end
+      if d.own then GameTooltip:AddLine("Some of these listings are yours (left out).", 1, 0.45, 0.45, true) end
       GameTooltip:Show()
     end)
     row:SetScript("OnLeave", function() GameTooltip:Hide() end)
     dealRows[k] = row
   end
+
+  dealNext = line(DEAL_BOTTOM)
+  dealBought = line(DEAL_BOTTOM - 14, 0.6)
+
+  skipButton = CreateFrame("Button", nil, dealsFrame, "UIPanelButtonTemplate")
+  skipButton:SetSize(70, 22)
+  skipButton:SetPoint("TOPRIGHT", -PAD, DEAL_BOTTOM - 34)
+  skipButton:SetText("Skip")
+  skipButton:SetScript("OnClick", safe(function()
+    local p = buyer.next
+    if not p or buyer.state then return end
+    p.d.buys, p.d.skipped = {}, true
+    updateDeals()
+  end))
+
+  dealBuyButton = CreateFrame("Button", "BoarFlipDealBuyButton", dealsFrame, "UIPanelButtonTemplate")
+  dealBuyButton:SetHeight(22)
+  dealBuyButton:SetPoint("TOPLEFT", PAD, DEAL_BOTTOM - 34)
+  dealBuyButton:SetPoint("RIGHT", skipButton, "LEFT", -6, 0)
+  dealBuyButton:SetScript("OnClick", onDealBuy)
+
   dealsFrame:Hide()
 end
 
 updateDeals = function()
   if not (dealsFrame and dealsFrame:IsShown()) then return end
-  local last = db.scans and db.scans[1]
+  local s = lastScan()
+  local nxt = not buyer.state and nextPurchase() or nil
+  buyer.next = nxt
+
   if scanning() then
     dealStatus:SetText(("Scanning: %d items so far..."):format(scan.count or 0))
   elseif scan.phase == "pricing" then
     dealStatus:SetText("Checking vendor prices...")
-  elseif last then
-    dealStatus:SetText(("Scan at %s: %d items, %d under vendor price%s."):format(date("%H:%M", last.at),
-      last.items, last.found, last.unpriced > 0 and (", %d not loaded"):format(last.unpriced) or ""))
+  elseif s then
+    dealStatus:SetText(("Scan at %s: %d items, %d under vendor price%s."):format(date("%H:%M", s.at),
+      s.items, s.found, s.unpriced > 0 and (", %d not loaded"):format(s.unpriced) or ""))
   else
     dealStatus:SetText("No scan yet: /flip scan at the auction house.")
   end
-  local list = last and last.deals or {}
+
+  -- What Buy all would earn.
+  local t = s and dealTotals(s)
+  if not (s and s.deals[1]) or scan.phase then
+    dealEarn:SetText("")
+  elseif not s.deals[1].key then
+    dealEarn:SetText("This scan is from an older Boar Flip: /flip scan again.")
+  elseif t.looked == 0 then
+    dealEarn:SetText(("One of each would earn +%s. Looking up the exact numbers..."):format(money(t.one)))
+  elseif t.looked < #s.deals then
+    local where = not look.running and " (stopped: /flip scan again)"
+      or not ah.open and " (goes on at the auction house)" or ""
+    dealEarn:SetText(("Looked up %d of %d%s: %d to buy, +%s so far"):format(t.looked, #s.deals,
+      where, t.n, money(t.worth - t.cost)))
+  else
+    dealEarn:SetText(("Buy all: %d for %s, a vendor pays %s: |cff73ff73+%s|r"):format(
+      t.n, money(t.cost), money(t.worth), money(t.worth - t.cost)))
+  end
+
+  -- The deals, from the one being bought on.
+  local list = s and s.deals or {}
+  local now = buyer.p or nxt
+  local first = now and math.max(1, now.i - 1) or 1
   for k, row in ipairs(dealRows) do
-    local d = list[k]
+    local d = list[first + k - 1]
     row.deal = d
     if d then
-      local link = select(2, GetItemInfo(d.id))
-      local name = link and link:gsub("[%[%]]", "") or d.name or ("item " .. d.id)
-      row.left:SetText(name .. (d.own and " |cffff7373(yours too)|r" or ""))
-      row.right:SetText(("+%s each, %d listed"):format(money(d.vendor - d.price), d.qty))
+      local mark = (now and now.d == d) and "|cffffd100>|r " or ""
+      row.left:SetText(mark .. plainName(d) .. (d.own and not d.buys and " |cffff7373(yours too)|r" or ""))
+      row.right:SetText(dealRowText(d))
       row:Show()
     else
       row:Hide()
     end
   end
+
+  local p = buyer.p or nxt
+  if buyer.halted then
+    dealNext:SetText("|cffff7373Stopped: " .. buyer.halted .. ". /flip scan starts again.|r")
+  elseif buyer.state == "confirm" then
+    dealNext:SetText(("Click Confirm: %s for %s"):format(plainName(p.d), money(buyer.quote or p.b.cost)))
+  elseif buyer.state then
+    dealNext:SetText(("Buying %s for %s..."):format(plainName(p.d), money(p.b.cost)))
+  elseif p then
+    local worth = p.d.vendor * p.b.qty
+    dealNext:SetText(("Next: %s%s for %s, vendor pays %s (+%s)"):format(plainName(p.d),
+      p.b.qty > 1 and (" x" .. p.b.qty) or "", money(p.b.cost), money(worth), money(worth - p.b.cost)))
+  elseif look.running then
+    dealNext:SetText("Looking up listings...")
+  else
+    dealNext:SetText(s and s.deals[1] and "Nothing left to buy." or "")
+  end
+
+  if (buyer.n or 0) > 0 then
+    dealBought:SetText(("Bought this session: %d for %s, a vendor pays %s: +%s"):format(
+      buyer.n, money(buyer.spent), money(buyer.worth), money(buyer.worth - buyer.spent)))
+  else
+    dealBought:SetText(("Your gold: %s"):format(money(GetMoney())))
+  end
+
+  if buyer.state == "confirm" then
+    dealBuyButton:SetText("Confirm")
+    dealBuyButton:SetEnabled(true)
+  elseif buyer.state then
+    dealBuyButton:SetText("Buying...")
+    dealBuyButton:SetEnabled(false)
+  elseif not ah.open then
+    dealBuyButton:SetText("Buy next (at the auction house)")
+    dealBuyButton:SetEnabled(false)
+  elseif buyer.halted then
+    dealBuyButton:SetText("Buy next (stopped)")
+    dealBuyButton:SetEnabled(false)
+  elseif nxt and not allowed(nxt) then
+    dealBuyButton:SetText("Buy next (not enough gold)")
+    dealBuyButton:SetEnabled(false)
+  elseif nxt then
+    dealBuyButton:SetText(("Buy next (%d left)"):format(t and t.n or 0))
+    dealBuyButton:SetEnabled(canBuyDeal())
+  else
+    dealBuyButton:SetText(look.running and "Buy next (looking up listings)" or "Buy next (nothing to buy)")
+    dealBuyButton:SetEnabled(false)
+  end
+  skipButton:SetEnabled(nxt ~= nil and not buyer.state)
 end
 
 local function showDeals()
@@ -1369,6 +1863,7 @@ local function startScan()
   -- The offer would go stale while the cloth searching waits.
   if ah.state == "offer" then ah.state = "idle" end
   ah.note, ah.waiting = nil, false
+  look.running, look.want = false, nil
   scan.phase, scan.count, scan.token, scan.pageAt, scan.wantMore = "start", 0, {}, GetTime(), false
   say("Scanning the auction house for vendor deals. Don't search in it until it's done.")
   showState()
@@ -1474,6 +1969,10 @@ local EVENTS = {
   "AUCTION_HOUSE_THROTTLED_MESSAGE_QUEUED", "AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED",
   "AUCTION_HOUSE_THROTTLED_SYSTEM_READY",
   "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED", "AUCTION_HOUSE_BROWSE_RESULTS_ADDED", "AUCTION_HOUSE_BROWSE_FAILURE",
+  "ITEM_SEARCH_RESULTS_UPDATED", "PLAYER_MONEY",
+  -- Which of these answers an item purchase isn't known yet: they're logged to find out.
+  "AUCTION_HOUSE_PURCHASE_COMPLETED", "AUCTION_HOUSE_SHOW_ERROR", "AUCTION_HOUSE_SHOW_NOTIFICATION",
+  "AUCTION_HOUSE_SHOW_FORMATTED_NOTIFICATION", "BID_ADDED",
 }
 for _, event in ipairs(EVENTS) do
   pcall(frame.RegisterEvent, frame, event)
@@ -1482,7 +1981,18 @@ end
 -- The game refused one of the addon's calls.
 local function onBlocked(what)
   what = tostring(what)
-  if what:find("StartCommoditiesPurchase") then
+  if what:find("StartCommoditiesPurchase") and buyer.state == "quoting" then
+    endPurchase(false, "The game blocked Boar Flip from buying.")
+  elseif what:find("PlaceBid") then
+    buyer.bidBlocked = true
+    if buyer.state == "bidding" then endPurchase(false, "The game blocked Boar Flip from buying.") end
+  elseif what:find("ConfirmCommoditiesPurchase") and buyer.state == "buying" then
+    -- From now on, ask for a click to confirm instead.
+    db.clickToConfirm = true
+    buyer.state = "confirm"
+    say("The game wants a click to confirm. Click Confirm.")
+    if updateDeals then updateDeals() end
+  elseif what:find("StartCommoditiesPurchase") then
     ah.startBlocked = true
     if ah.state == "quoting" then backToSearch(BLOCKED) end
   elseif what:find("PostCommodity") then
@@ -1549,6 +2059,8 @@ frame:SetScript("OnEvent", safe(function(_, event, ...)
 
   elseif event == "AUCTION_HOUSE_CLOSED" then
     if scanning() then stopScan("Scan stopped: the auction house closed.") end
+    if buyer.state then purchaseTimedOut("the auction house closed") end
+    look.want = nil
     ah.open = false
     if ticker then ticker:Cancel() ticker = nil end
     if ah.state == "quoting" or ah.state == "confirm" then cancelPurchase("auction house closed") end
@@ -1560,6 +2072,28 @@ frame:SetScript("OnEvent", safe(function(_, event, ...)
 
   elseif event == "AUCTION_HOUSE_BROWSE_FAILURE" then
     if scanning() then stopScan("The auction house turned the scan down. Try /flip scan again.") end
+
+  elseif event == "ITEM_SEARCH_RESULTS_UPDATED" then
+    onLookItems(...)
+
+  elseif event == "PLAYER_MONEY" then
+    onDealMoney()
+
+  elseif event == "AUCTION_HOUSE_PURCHASE_COMPLETED" or event == "AUCTION_HOUSE_SHOW_ERROR"
+    or event == "AUCTION_HOUSE_SHOW_NOTIFICATION" or event == "AUCTION_HOUSE_SHOW_FORMATTED_NOTIFICATION"
+    or event == "BID_ADDED" then
+    log(event, ...)
+    onDealEvent(event, ...)
+
+  -- A deal purchase going: the commodity answers are its (the cloth's Buy is off meanwhile).
+  elseif buyer.state and (event == "COMMODITY_PRICE_UPDATED" or event == "COMMODITY_PRICE_UNAVAILABLE"
+    or event == "COMMODITY_PURCHASE_SUCCEEDED" or event == "COMMODITY_PURCHASE_FAILED") then
+    log(event, ...)
+    onDealEvent(event, ...)
+
+  elseif event == "COMMODITY_SEARCH_RESULTS_UPDATED" then
+    onLookCommodity(...)
+    onAuctionEvent(event, ...)
 
   elseif event == "MAIL_SHOW" then
     mail.open = true
