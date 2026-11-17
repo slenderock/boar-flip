@@ -806,11 +806,12 @@ end
 
 function M.Busy() return buyer.state ~= nil end
 function M.Purchasing() return buyer.state ~= nil end
--- The items bought, to watch at a vendor.
+-- The items Buy next went for, to watch at a vendor. All of them: before 2.7, many it
+-- bought were recorded as "Couldn't buy".
 function M.Items()
   local ids, seen = {}, {}
   for _, b in ipairs(db and db.buys or {}) do
-    if b.result and b.result:find("^bought") and not seen[b.id] then
+    if b.id and not seen[b.id] then
       seen[b.id] = true
       ids[#ids + 1] = b.id
     end
