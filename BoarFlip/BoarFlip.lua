@@ -454,6 +454,7 @@ local SCAN_WAIT = 10        -- seconds to wait for items the game hasn't loaded 
 local SCAN_KEEP, SCAN_SAVED = 5, 50   -- scans kept, deals kept for the older ones
 local LOOK_TIMEOUT = 3      -- seconds to wait for one deal's listings
 local BUY_TIMEOUT = 8       -- seconds to wait for a purchase to go through
+local SETTLE_WAIT, ERROR_WAIT = 2, 3   -- seconds for the gold after the game's word; for the word after an error
 local BUYS_KEPT = 50        -- purchases kept in BoarFlipDB.buys
 local MIN_MARGIN = 20       -- copper a vendor must pay over the price, per item; less isn't worth it
 local PRICE_SORT = { { sortOrder = Enum.AuctionHouseSortOrder and Enum.AuctionHouseSortOrder.Price or 0, reverseSort = false } }
@@ -622,7 +623,13 @@ local function onBrowse(event, added)
   if event == "AUCTION_HOUSE_BROWSE_RESULTS_ADDED" then
     scan.count = (scan.count or 0) + (type(added) == "table" and #added or 0)
   else
-    scan.count = #C_AuctionHouse.GetBrowseResults()
+    -- A first page with fewer items than the scan had: another search replaced it.
+    local n = #C_AuctionHouse.GetBrowseResults()
+    if n < (scan.count or 0) then
+      log("scan: replaced,", scan.count, "items so far, now", n)
+      return stopScan("Scan stopped: another search in the auction house replaced it. Rescan, and don't search until it's done.")
+    end
+    scan.count = n
   end
   if C_AuctionHouse.HasFullBrowseResults() then
     priceResults(C_AuctionHouse.GetBrowseResults())
@@ -779,34 +786,43 @@ local function dealName(d)
   return d.link or select(2, GetItemInfo(d.id)) or d.name or ("item " .. d.id)
 end
 
--- The purchase is over, bought or not. paid is what it cost when bought.
-local function endPurchase(bought, text, paid)
-  local p = buyer.p
-  local before = buyer.gold
+-- Writes a purchase to BoarFlipDB.buys and, when bought, to the totals. paid is its cost.
+local function account(p, bought, result, paid, before)
+  local worth = p.d.vendor * p.b.qty
+  db.buys = db.buys or {}
+  table.insert(db.buys, 1, { at = time(), id = p.d.id, name = GetItemInfo(p.d.id), qty = p.b.qty, cost = p.b.cost,
+    auction = p.b.auction, paid = paid, worth = worth, goldBefore = before, goldAfter = GetMoney(), result = result })
+  while #db.buys > BUYS_KEPT do table.remove(db.buys) end
+  log("deal:", result, p.d.id, "qty", p.b.qty, "cost", p.b.cost, "auction", p.b.auction, "gold", before, "->", GetMoney())
+  if not bought then return end
+  local t = db.dealTotals or { bought = 0, spent = 0, worth = 0 }
+  db.dealTotals = t
+  t.bought, t.spent, t.worth = t.bought + p.b.qty, t.spent + paid, t.worth + worth
+  p.d.bought = (p.d.bought or 0) + p.b.qty
+  buyer.n, buyer.spent, buyer.worth = (buyer.n or 0) + p.b.qty, (buyer.spent or 0) + paid, (buyer.worth or 0) + worth
+  say(("Bought %s%s for %s, a vendor pays %s: +%s."):format(dealName(p.d),
+    p.b.qty > 1 and (" x" .. p.b.qty) or "", money(paid), money(worth), money(worth - paid)))
+end
+
+-- The purchase is over, bought or not.
+local function endPurchase(bought, text)
+  local p, before = buyer.p, buyer.gold
+  local paid = p and (buyer.quote or p.b.cost)
   buyer.state, buyer.p, buyer.at, buyer.gold, buyer.quote = nil, nil, nil, nil, nil
+  buyer.done, buyer.charged, buyer.errorAt, buyer.errorCode = nil, nil, nil, nil
   if not p then return end
   for i, b in ipairs(p.d.buys) do
     if b == p.b then table.remove(p.d.buys, i) break end
   end
-  local worth = p.d.vendor * p.b.qty
-  db.buys = db.buys or {}
-  table.insert(db.buys, 1, { at = time(), id = p.d.id, name = GetItemInfo(p.d.id), qty = p.b.qty, cost = p.b.cost,
-    paid = paid, worth = worth, goldBefore = before, goldAfter = GetMoney(), result = bought and "bought" or (text or "not bought") })
-  while #db.buys > BUYS_KEPT do table.remove(db.buys) end
-  log("deal:", bought and "bought" or "not bought", p.d.id, "qty", p.b.qty, "cost", p.b.cost, "paid", paid,
-    "gold", before, "->", GetMoney(), text)
-  if bought then
-    local t = db.dealTotals or { bought = 0, spent = 0, worth = 0 }
-    db.dealTotals = t
-    t.bought, t.spent, t.worth = t.bought + p.b.qty, t.spent + paid, t.worth + worth
-    p.d.bought = (p.d.bought or 0) + p.b.qty
-    buyer.n, buyer.spent, buyer.worth = (buyer.n or 0) + p.b.qty, (buyer.spent or 0) + paid, (buyer.worth or 0) + worth
-    say(("Bought %s%s for %s, a vendor pays %s: +%s."):format(dealName(p.d),
-      p.b.qty > 1 and (" x" .. p.b.qty) or "", money(paid), money(worth), money(worth - paid)))
-  elseif text then
-    say(text)
-  end
+  account(p, bought, bought and "bought" or (text or "not bought"), bought and paid or nil, before)
+  if not bought and text then say(text) end
   if updateDeals then updateDeals() end
+end
+
+-- A purchase is bought once the game says so (buyer.done) and the gold went down by it
+-- (buyer.charged). Both are waited for, so a late gold change never lands in the next one.
+local function settle()
+  if buyer.done and buyer.charged then endPurchase(true) end
 end
 
 -- Gold went down by more than the purchase: stop buying until the next scan.
@@ -818,40 +834,60 @@ local function tripwire(drop, cost)
   return true
 end
 
--- Item purchases: the gold going down by the cost is what counts as bought.
+-- The gold going down by the cost: one half of a purchase going through (see settle).
 local function onDealMoney()
   if not (buyer.state and buyer.gold) then return end
   local drop = buyer.gold - GetMoney()
   if drop <= 0 then return end
-  local cost = buyer.state == "bidding" and buyer.p.b.cost or buyer.quote or buyer.p.b.cost
+  local cost = buyer.quote or buyer.p.b.cost
   tripwire(drop, cost)
-  if buyer.state == "bidding" and drop >= cost then endPurchase(true, nil, drop) end
+  if drop >= cost and (buyer.state == "bidding" or buyer.state == "buying") then
+    buyer.charged = true
+    settle()
+  end
 end
 
--- No answer in time, or the auction house closed: the gold says whether it went through.
+-- No answer in time, or the auction house closed. The game's word or the gold going down
+-- by the cost counts it as bought; otherwise a late word for this auction still does.
 local function purchaseTimedOut(why)
   local s, p = buyer.state, buyer.p
   if s == "quoting" or s == "confirm" then
     cancelPurchase("deal: " .. why)
     return endPurchase(false, "Skipped: " .. why .. ".")
   end
-  local drop = buyer.gold - GetMoney()
-  local cost = s == "bidding" and p.b.cost or buyer.quote or p.b.cost
-  if drop > 0 and drop >= cost then
-    tripwire(drop, cost)
-    return endPurchase(true, nil, drop)
+  if buyer.done or buyer.charged then return endPurchase(true) end
+  if s == "bidding" then
+    buyer.late = buyer.late or {}
+    buyer.late[p.b.auction] = p
   end
-  endPurchase(false, ("No answer about %s (%s): skipped it. If it shows up in your mailbox, it was bought."):format(dealName(p.d), why))
+  endPurchase(false, ("No word that %s was bought (%s): skipped it. If it shows up in your mailbox, it was."):format(dealName(p.d), why))
 end
 
 local function buyerTimeouts()
-  if not buyer.state or buyer.state == "confirm" then return end
-  if GetTime() - buyer.at > BUY_TIMEOUT then purchaseTimedOut("no answer") end
+  local s = buyer.state
+  if not s or s == "confirm" then return end
+  local now = GetTime()
+  if buyer.done then
+    -- The game said it went through; the gold is only a little late.
+    if now - buyer.doneAt > SETTLE_WAIT then endPurchase(true) end
+  elseif buyer.errorAt and now - buyer.errorAt > ERROR_WAIT then
+    purchaseTimedOut("auction house error " .. tostring(buyer.errorCode))
+  elseif now - buyer.at > BUY_TIMEOUT then
+    purchaseTimedOut("no answer")
+  end
 end
 
 -- The auction house's answers while a deal purchase is going. They carry no item, so the
 -- cloth's Buy is kept off meanwhile.
 local function onDealEvent(event, ...)
+  -- The word for a purchase already given up on: it was bought after all.
+  if event == "AUCTION_HOUSE_PURCHASE_COMPLETED" and buyer.late and buyer.late[...] then
+    local lp = buyer.late[...]
+    buyer.late[...] = nil
+    account(lp, true, "bought (late word)", lp.b.cost)
+    if updateDeals then updateDeals() end
+    return
+  end
   local p = buyer.p
   if not p then return end
   if event == "COMMODITY_PRICE_UPDATED" and buyer.state == "quoting" then
@@ -872,20 +908,16 @@ local function onDealEvent(event, ...)
     end
   elseif event == "COMMODITY_PRICE_UNAVAILABLE" and buyer.state == "quoting" then
     endPurchase(false, ("Skipped %s: it sold out."):format(dealName(p.d)))
-  elseif event == "COMMODITY_PURCHASE_SUCCEEDED" and buyer.state == "buying" then
-    local drop = buyer.gold - GetMoney()
-    if drop > 0 then tripwire(drop, buyer.quote) end
-    endPurchase(true, nil, buyer.quote)
+  elseif (event == "COMMODITY_PURCHASE_SUCCEEDED" and buyer.state == "buying")
+    or (event == "AUCTION_HOUSE_PURCHASE_COMPLETED" and buyer.state == "bidding" and ... == p.b.auction) then
+    buyer.done, buyer.doneAt = true, GetTime()
+    settle()
   elseif event == "COMMODITY_PURCHASE_FAILED" and buyer.state == "buying" then
     endPurchase(false, ("Someone else got %s first."):format(dealName(p.d)))
-  elseif event == "AUCTION_HOUSE_PURCHASE_COMPLETED" and buyer.state == "bidding" then
-    if ... == p.b.auction then
-      local drop = buyer.gold - GetMoney()
-      if drop > 0 then tripwire(drop, p.b.cost) end
-      endPurchase(true, nil, p.b.cost)
-    end
   elseif event == "AUCTION_HOUSE_SHOW_ERROR" and buyer.state == "bidding" then
-    endPurchase(false, ("Couldn't buy %s: someone else probably got it first."):format(dealName(p.d)))
+    -- Not the end: "Internal auction error" (10) comes for purchases that go through, the
+    -- game's word right after it. With no word in ERROR_WAIT seconds, it didn't.
+    buyer.errorAt, buyer.errorCode = buyer.errorAt or GetTime(), ...
   end
 end
 
@@ -1651,7 +1683,8 @@ local function onDealBuy()
     return updateDeals()
   end
   buyer.p, buyer.at, buyer.gold = p, GetTime(), GetMoney()
-  log("deal click:", buyer.state, p.d.id, "qty", p.b.qty, "cost", p.b.cost, "vendor", p.d.vendor * p.b.qty, "gold", buyer.gold)
+  log("deal click:", buyer.state, p.d.id, "qty", p.b.qty, "cost", p.b.cost, "vendor", p.d.vendor * p.b.qty,
+    "auction", p.b.auction, "gold", buyer.gold)
   updateDeals()
 end
 
@@ -2090,6 +2123,13 @@ frame:SetScript("OnEvent", safe(function(_, event, ...)
     ah.open = true
     ah.state, ah.note, ah.seen, ah.waiting, ah.lastAt, ah.openedAt = "idle", nil, false, false, 0, GetTime()
     ah.checkedAt = nil
+    -- Listings looked up at an earlier visit can't be bought (no answer): look them up again.
+    local s = lastScan()
+    local again = false
+    for _, d in ipairs(s and s.deals or {}) do
+      if d.key and d.buys and d.buys[1] then d.buys, again = nil, true end
+    end
+    if again then startLook() end
     if ticker then ticker:Cancel() end
     ticker = C_Timer.NewTicker(0.1, safe(function()
       refresh()
