@@ -1,8 +1,10 @@
 // Runs Boar Flip in a mocked WoW (wowmock.lua) under fengari, a Lua VM in JavaScript.
-//   node run.js [--toc file.toc] [scenario.lua ...]
+//   node run.js [--toc file.toc] [--dump dir] [scenario.lua ...]
 // Each scenario starts a fresh game: the mock, then the addon's .lua files in .toc order
 // (each gets ADDON and the shared ns as ...), then the scenario. With no scenarios given
 // it runs every scenario-*.lua here. Exits 1 if a check fails or Lua errors.
+// --dump dir writes each scenario's chat and the game calls it made, to compare two
+// versions of the addon (diff the dirs).
 const path = require('path');
 const fs = require('fs');
 const { lua, lauxlib, lualib, to_luastring, to_jsstring } = require('fengari');
@@ -11,6 +13,9 @@ const args = process.argv.slice(2);
 let toc = path.join(__dirname, '..', 'BoarFlip', 'BoarFlip.toc');
 const tocAt = args.indexOf('--toc');
 if (tocAt >= 0) { toc = path.resolve(args[tocAt + 1]); args.splice(tocAt, 2); }
+let dumpDir = null;
+const dumpAt = args.indexOf('--dump');
+if (dumpAt >= 0) { dumpDir = path.resolve(args[dumpAt + 1]); args.splice(dumpAt, 2); fs.mkdirSync(dumpDir, { recursive: true }); }
 const addonDir = path.join(__dirname, '..', 'BoarFlip');
 const files = fs.readFileSync(toc, 'utf8').split(/\r?\n/).map(s => s.trim())
   .filter(s => s && !s.startsWith('#') && s.endsWith('.lua'));
@@ -49,6 +54,21 @@ function run(L, file, addonArgs) {
   lua.lua_pop(L, 1);
 }
 
+function dump(L, file) {
+  lauxlib.luaL_dostring(L, to_luastring(`
+    local lines = {}
+    for _, l in ipairs(mock.out) do lines[#lines + 1] = "chat " .. l end
+    for _, c in ipairs(mock.calls) do
+      local a = {}
+      for i, v in ipairs(c.args) do a[i] = type(v) == "table" and "{}" or tostring(v) end
+      lines[#lines + 1] = "call " .. c.name .. " " .. table.concat(a, " ")
+    end
+    __dump = table.concat(lines, "\\n")`));
+  lua.lua_getglobal(L, to_luastring('__dump'));
+  fs.writeFileSync(file, to_jsstring(lua.lua_tostring(L, -1)) + '\n');
+  lua.lua_pop(L, 1);
+}
+
 function failures(L) {
   lua.lua_getglobal(L, to_luastring('mock'));
   lua.lua_getfield(L, -1, to_luastring('failures'));
@@ -66,6 +86,7 @@ for (const s of scenarios) {
     for (const f of files) run(L, path.join(addonDir, f), true);
     run(L, s, false);
     failed += failures(L);
+    if (dumpDir) dump(L, path.join(dumpDir, path.basename(s, '.lua') + '.txt'));
   } catch (e) {
     console.log('  ERROR ' + e.message);
     failed += 1;
