@@ -1132,7 +1132,7 @@ ns.listen("load", function(saved)
   end
   if hooksecurefunc and UIErrorsFrame then
     hooksecurefunc(UIErrorsFrame, "AddMessage", function(_, text)
-      if ah.open or mail.open or craft.open then addLog("on screen: " .. tostring(text), false) end
+      if ah.open or mail.open or craft.open then addLog("on screen: " .. tostring(text)) end
     end)
   end
   makeWindow()

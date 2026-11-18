@@ -102,4 +102,8 @@ mock.fire("AUCTION_HOUSE_BROWSE_RESULTS_ADDED", {})
 wait(3)
 check(searchesFor(4306) > before, "the cloth search is back after the scan")
 
+-- Debug saves each step to the log, but none of it goes to chat.
+check(#BoarFlipDB.log > 10, "debug: steps are logged (" .. #BoarFlipDB.log .. ")")
+check(not mock.said("^%d%d:%d%d:%d%d %d+%.%d%d%d "), "but none show in chat")
+
 mock.noErrors()

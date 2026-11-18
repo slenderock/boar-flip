@@ -25,28 +25,27 @@ ns.on = false
 local frame = CreateFrame("Frame")
 
 
--- /flip debug: each step goes to chat (grey) and to BoarFlipDB.log, the last 1500 lines,
+-- /flip debug: each step goes to BoarFlipDB.log (not to chat), the last 1500 lines,
 -- which WoW writes to disk on /reload or logout. The number after the time of day is
 -- the game's precise clock in seconds, for timing.
-local function addLog(text, show)
+local function addLog(text)
   if not (db and db.debug) then return end
   local line = ("%s %.3f %s"):format(date("%H:%M:%S"), GetTime(), text)
   db.log = db.log or {}
   table.insert(db.log, line)
   while #db.log > LOG_LINES do table.remove(db.log, 1) end
-  if show then print("|cff999999" .. line .. "|r") end
 end
 
 local function log(...)
   if not (db and db.debug) then return end
   local parts = {}
   for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
-  addLog(table.concat(parts, " "), true)
+  addLog(table.concat(parts, " "))
 end
 
 local function say(text)
   print("|cffe6b800Boar Flip:|r " .. text)
-  addLog("said: " .. text, false)
+  addLog("said: " .. text)
 end
 
 -- Script errors are turned off in the game, so a broken step says so in chat (once each)
@@ -573,7 +572,7 @@ SlashCmdList.BOARFLIP = safe(function(msg)
     db.debug = not db.debug or nil
     if db.debug then
       db.log = {}
-      say("Debug on: each step shows in grey and is saved. Type /reload afterwards so WoW writes it to disk.")
+      say("Debug on: each step is saved (not shown in chat). Type /reload afterwards so WoW writes it to disk.")
     else
       say("Debug off. The log stays saved until debug is turned on again.")
     end
